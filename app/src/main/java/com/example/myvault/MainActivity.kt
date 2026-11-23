@@ -1,7 +1,8 @@
 @file:OptIn(
     androidx.compose.foundation.ExperimentalFoundationApi::class,
     androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
-    androidx.compose.material3.ExperimentalMaterial3Api::class
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    androidx.media3.common.util.UnstableApi::class
 )
 
 package com.example.myvault
@@ -9,8 +10,6 @@ package com.example.myvault
 import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Matrix
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
@@ -57,6 +56,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -67,6 +67,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -92,6 +93,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -102,14 +104,23 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.IntentCompat
-import androidx.exifinterface.media.ExifInterface
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.datasource.BaseDataSource
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.IOException
 import kotlin.math.roundToInt
 
 // ============================================================ theme
@@ -141,11 +152,11 @@ sealed class PinResult {
 }
 
 object ThumbCache {
-    private val cache = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 8).toInt()) {
-        override fun sizeOf(key: String, value: Bitmap) = value.byteCount
+    private val cache = object : LruCache<String, ItemInfo>((Runtime.getRuntime().maxMemory() / 8).toInt()) {
+        override fun sizeOf(key: String, value: ItemInfo) = value.thumb?.byteCount ?: 1024
     }
-    fun get(k: String): Bitmap? = cache.get(k)
-    fun put(k: String, v: Bitmap) { cache.put(k, v) }
+    fun get(k: String): ItemInfo? = cache.get(k)
+    fun put(k: String, v: ItemInfo) { cache.put(k, v) }
     fun clear() = cache.evictAll()
 }
 
@@ -158,9 +169,11 @@ class MainActivity : ComponentActivity() {
     private var hasAllFiles by mutableStateOf(false)
     private var photos by mutableStateOf<List<File>>(emptyList())
     private var viewIndex by mutableStateOf<Int?>(null)
-    private var busy by mutableStateOf(false)
+    private var busyText by mutableStateOf<String?>(null)
 
     private val pendingShared = mutableListOf<Uri>()
+    private val pendingDelete = mutableListOf<Uri>()
+    private var importing = 0
     private var suppressLock = false // true only while a system dialog/picker is on top
 
     private val deleteLauncher =
@@ -240,11 +253,11 @@ class MainActivity : ComponentActivity() {
 
                             else -> VaultScreen(
                                 photos = photos,
-                                busy = busy,
+                                busyText = busyText,
                                 onAdd = {
                                     suppressLock = true
                                     picker.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
                                     )
                                 },
                                 onLock = { lockNow() },
@@ -269,7 +282,7 @@ class MainActivity : ComponentActivity() {
                             onDismissRequest = { toDelete = null },
                             containerColor = Surf,
                             title = { Text("Delete permanently?") },
-                            text = { Text("This photo will be gone for good. This cannot be undone.", color = TextSec) },
+                            text = { Text("This item will be gone for good. This cannot be undone.", color = TextSec) },
                             confirmButton = {
                                 TextButton(onClick = {
                                     toDelete = null
@@ -296,6 +309,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         suppressLock = false
         hasAllFiles = Environment.isExternalStorageManager()
+        flushDeletes()
         if (unlocked && hasAllFiles) afterUnlock()
     }
 
@@ -308,10 +322,11 @@ class MainActivity : ComponentActivity() {
     // ------------------------------------------------------------ lock / unlock
 
     private fun lockNow() {
-        VaultCrypto.lock()
-        ThumbCache.clear()
         unlocked = false
         viewIndex = null
+        ThumbCache.clear()
+        // If an import is still running, the key is cleared as soon as it finishes
+        if (importing == 0) VaultCrypto.lock()
     }
 
     private fun afterUnlock() {
@@ -323,7 +338,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun listSorted() = VaultCrypto.listPhotos().sortedByDescending { it.lastModified() }
+    private fun listSorted() = VaultCrypto.listItems().sortedByDescending { it.lastModified() }
 
     // ------------------------------------------------------------ import (Share)
 
@@ -343,7 +358,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Shared photos wait here until the PIN is entered
+    // Shared items wait here until the PIN is entered
     private fun processPending() {
         if (!unlocked || !hasAllFiles || pendingShared.isEmpty()) return
         val uris = pendingShared.toList()
@@ -354,17 +369,40 @@ class MainActivity : ComponentActivity() {
     private fun importUris(uris: List<Uri>, deleteOriginals: Boolean) {
         if (!unlocked || !hasAllFiles) return
         lifecycleScope.launch {
-            busy = true
-            val done = withContext(Dispatchers.IO) {
-                uris.filter { runCatching { VaultCrypto.importPhoto(this@MainActivity, it) }.isSuccess }
+            importing++
+            val done = ArrayList<Uri>()
+            var failed = 0
+            try {
+                for ((i, u) in uris.withIndex()) {
+                    busyText = "Importing ${i + 1} of ${uris.size}…"
+                    val ok = withContext(Dispatchers.IO) {
+                        runCatching { VaultCrypto.importMedia(this@MainActivity, u) }.isSuccess
+                    }
+                    if (ok) {
+                        done.add(u)
+                        photos = withContext(Dispatchers.IO) { listSorted() }
+                    } else failed++
+                }
+            } finally {
+                busyText = null
+                importing--
+                if (importing == 0 && !unlocked) VaultCrypto.lock()
             }
-            photos = withContext(Dispatchers.IO) { listSorted() }
-            busy = false
+            if (failed > 0) {
+                Toast.makeText(this@MainActivity, "$failed file(s) could not be imported", Toast.LENGTH_LONG).show()
+            }
             if (deleteOriginals) {
-                val deletable = done.filter { it.authority == "media" }
-                if (deletable.isNotEmpty()) requestDelete(deletable)
+                pendingDelete.addAll(done.filter { it.authority == "media" })
+                if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) flushDeletes()
             }
         }
+    }
+
+    private fun flushDeletes() {
+        if (pendingDelete.isEmpty()) return
+        val l = pendingDelete.toList()
+        pendingDelete.clear()
+        requestDelete(l)
     }
 
     // Android asks the user once to confirm removing the originals from Gallery
@@ -379,16 +417,16 @@ class MainActivity : ComponentActivity() {
     // ------------------------------------------------------------ restore / delete
 
     private fun deleteFromVault(f: File) {
-        f.delete()
+        VaultCrypto.deleteItem(f)
         photos = photos - f
         if (photos.isEmpty()) viewIndex = null
     }
 
     private fun restoreToGallery(f: File) {
         lifecycleScope.launch {
-            busy = true
+            busyText = "Restoring…"
             val ok = withContext(Dispatchers.IO) { restore(f) }
-            busy = false
+            busyText = null
             if (ok) {
                 photos = photos - f
                 if (photos.isEmpty()) viewIndex = null
@@ -400,20 +438,35 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun restore(f: File): Boolean = runCatching {
-        val bytes = VaultCrypto.openPhoto(f).use { it.readBytes() }
-        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
-        val mime = o.outMimeType ?: "image/jpeg"
-        val ext = mime.substringAfter('/').replace("jpeg", "jpg")
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "Restored_${System.currentTimeMillis()}.$ext")
-            put(MediaStore.Images.Media.MIME_TYPE, mime)
-            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Restored")
+        val info = VaultCrypto.info(f)
+        val mime = info.mime
+        val ext = when (val sub = mime.substringAfter('/').substringBefore(';')) {
+            "jpeg" -> "jpg"
+            "quicktime" -> "mov"
+            "x-matroska" -> "mkv"
+            "3gpp" -> "3gp"
+            else -> sub
         }
-        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, "Restored_${System.currentTimeMillis()}.$ext")
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            put(
+                MediaStore.MediaColumns.RELATIVE_PATH,
+                if (info.isVideo) "Movies/Restored" else "Pictures/Restored"
+            )
+        }
+        val collection = if (info.isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        val uri = contentResolver.insert(collection, values)
             ?: throw IllegalStateException("insert failed")
-        contentResolver.openOutputStream(uri)!!.use { it.write(bytes) }
-        f.delete() // remove from vault only after the Gallery copy is written
+        try {
+            contentResolver.openOutputStream(uri)!!.use { VaultCrypto.copyDecrypted(f, it) }
+        } catch (e: Throwable) {
+            contentResolver.delete(uri, null, null)
+            throw e
+        }
+        VaultCrypto.deleteItem(f) // remove from vault only after the Gallery copy is written
+        true
     }.getOrDefault(false)
 }
 
@@ -637,7 +690,7 @@ fun PermissionScreen(onOpenSettings: () -> Unit) {
         Spacer(Modifier.height(10.dp))
         Text(
             "Android needs \"All files access\" so your vault can keep its hidden .MyVault folder. " +
-                "Your photos stay encrypted at all times.",
+                "Your files stay encrypted at all times.",
             color = TextSec, fontSize = 14.sp, textAlign = TextAlign.Center
         )
         Spacer(Modifier.height(28.dp))
@@ -650,7 +703,7 @@ fun PermissionScreen(onOpenSettings: () -> Unit) {
 @Composable
 fun VaultScreen(
     photos: List<File>,
-    busy: Boolean,
+    busyText: String?,
     onAdd: () -> Unit,
     onLock: () -> Unit,
     onOpen: (Int) -> Unit
@@ -665,7 +718,7 @@ fun VaultScreen(
             Column(Modifier.weight(1f)) {
                 Text(APP_NAME, color = TextPri, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                 Text(
-                    if (photos.isEmpty()) "Private vault" else "${photos.size} photos  •  AES-256 encrypted",
+                    if (photos.isEmpty()) "Private vault" else "${photos.size} items  •  AES-256 encrypted",
                     color = TextSec, fontSize = 12.sp, maxLines = 1
                 )
             }
@@ -674,8 +727,16 @@ fun VaultScreen(
             IconCircleButton(Icons.Filled.Lock, accent = false, onClick = onLock)
         }
 
-        if (busy) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp), color = Accent1, trackColor = Surf)
-        else Spacer(Modifier.height(2.dp))
+        if (busyText != null) {
+            LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp), color = Accent1, trackColor = Surf)
+            Text(
+                busyText,
+                color = TextSec, fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+            )
+        } else {
+            Spacer(Modifier.height(2.dp))
+        }
 
         if (photos.isEmpty()) {
             EmptyState(onAdd)
@@ -706,29 +767,48 @@ fun EmptyState(onAdd: () -> Unit) {
         Text("Your vault is empty", color = TextPri, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(8.dp))
         Text(
-            "Share photos from your Gallery to this app, or tap below. They'll be locked away safely.",
+            "Share photos and videos from your Gallery to this app, or tap below. They'll be locked away safely.",
             color = TextSec, fontSize = 14.sp, textAlign = TextAlign.Center
         )
         Spacer(Modifier.height(28.dp))
-        GradientButton("Add photos", Icons.Filled.Add, onAdd)
+        GradientButton("Add photos & videos", Icons.Filled.Add, onAdd)
+    }
+}
+
+@Composable
+fun PlayBadge(modifier: Modifier) {
+    Box(
+        modifier.size(28.dp).clip(CircleShape).background(Color(0x99000000)),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(Icons.Filled.PlayArrow, null, tint = Color.White, modifier = Modifier.size(18.dp))
     }
 }
 
 @Composable
 fun Thumb(f: File, onClick: () -> Unit) {
-    val bmp by produceState<Bitmap?>(ThumbCache.get(f.name), f) {
+    val info by produceState<ItemInfo?>(ThumbCache.get(f.name), f) {
         if (value == null) {
-            value = withContext(Dispatchers.IO) { loadBitmap(f, 300) }?.also { ThumbCache.put(f.name, it) }
+            value = withContext(Dispatchers.IO) { runCatching { VaultCrypto.info(f) }.getOrNull() }
+                ?.also { ThumbCache.put(f.name, it) }
         }
     }
+    val i = info
     Box(
         Modifier
             .aspectRatio(1f)
             .clip(RoundedCornerShape(12.dp))
             .background(Surf)
-            .clickable(onClick = onClick)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
     ) {
-        bmp?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+        val t = i?.thumb
+        if (t != null) {
+            Image(t.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        } else if (i != null) {
+            Icon(Icons.Filled.Lock, null, tint = TextSec, modifier = Modifier.size(28.dp))
+        }
+        if (i?.isVideo == true) PlayBadge(Modifier.align(Alignment.BottomStart).padding(6.dp))
     }
 }
 
@@ -752,7 +832,7 @@ fun Viewer(
             modifier = Modifier.fillMaxSize(),
             key = { photos.getOrNull(it)?.name ?: it }
         ) { page ->
-            photos.getOrNull(page)?.let { ZoomableImage(it) }
+            photos.getOrNull(page)?.let { MediaPage(it, active = pager.currentPage == page) }
         }
 
         Row(
@@ -792,9 +872,66 @@ fun Viewer(
 }
 
 @Composable
+fun MediaPage(f: File, active: Boolean) {
+    val info by produceState<ItemInfo?>(ThumbCache.get(f.name), f) {
+        if (value == null) {
+            val loaded = withContext(Dispatchers.IO) { runCatching { VaultCrypto.info(f) }.getOrNull() }
+                ?: ItemInfo(false, "image/jpeg", null)
+            ThumbCache.put(f.name, loaded)
+            value = loaded
+        }
+    }
+    val i = info
+    when {
+        i == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(color = Accent1)
+        }
+        i.isVideo && f.extension == "vlt" -> Box(
+            Modifier.fillMaxSize().padding(40.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "This video was saved by an older version of the app and can't be played here. " +
+                    "Tap Restore to move it back to your Gallery.",
+                color = Color.White, textAlign = TextAlign.Center
+            )
+        }
+        i.isVideo -> if (active) ActivePlayer(f) else Box(
+            Modifier.fillMaxSize().background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) { PlayBadge(Modifier) }
+        else -> ZoomableImage(f)
+    }
+}
+
+@Composable
+fun ActivePlayer(f: File) {
+    val ctx = LocalContext.current
+    val exo = remember(f) {
+        ExoPlayer.Builder(ctx).build().apply {
+            val src = ProgressiveMediaSource.Factory(DataSource.Factory { VaultDataSource() })
+                .createMediaSource(MediaItem.fromUri(Uri.fromFile(f)))
+            setMediaSource(src)
+            prepare()
+            playWhenReady = true
+        }
+    }
+    DisposableEffect(exo) { onDispose { exo.release() } }
+    AndroidView(
+        factory = { c ->
+            PlayerView(c).apply {
+                player = exo
+                useController = true
+            }
+        },
+        modifier = Modifier.fillMaxSize().padding(top = 64.dp, bottom = 84.dp)
+    )
+}
+
+@Composable
 fun ZoomableImage(f: File) {
-    val bmp by produceState<Bitmap?>(null, f) {
-        value = withContext(Dispatchers.IO) { loadBitmap(f, 2048) }
+    val loaded by produceState<Pair<Boolean, Bitmap?>?>(null, f) {
+        value = true to withContext(Dispatchers.IO) { loadBitmap(f, 2048) }
     }
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
@@ -834,11 +971,12 @@ fun ZoomableImage(f: File) {
             },
         contentAlignment = Alignment.Center
     ) {
-        val b = bmp
-        if (b == null) {
-            CircularProgressIndicator(color = Accent1)
-        } else {
-            Image(
+        val l = loaded
+        val b = l?.second
+        when {
+            l == null -> CircularProgressIndicator(color = Accent1)
+            b == null -> Text("Can't display this file", color = TextSec)
+            else -> Image(
                 b.asImageBitmap(), null,
                 Modifier.fillMaxSize().graphicsLayer(
                     scaleX = scale, scaleY = scale,
@@ -852,25 +990,59 @@ fun ZoomableImage(f: File) {
 
 // ============================================================ image decoding
 
-// Decrypts once, downsamples, and fixes camera rotation
-fun loadBitmap(f: File, maxDim: Int): Bitmap? = runCatching {
-    val bytes = VaultCrypto.openPhoto(f).use { it.readBytes() }
-    val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
-    var s = 1
-    while (o.outWidth / (s * 2) >= maxDim && o.outHeight / (s * 2) >= maxDim) s *= 2
-    val bmp = BitmapFactory.decodeByteArray(
-        bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = s }
-    ) ?: throw IllegalStateException("decode failed")
-    val deg = when (
-        ExifInterface(ByteArrayInputStream(bytes))
-            .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-    ) {
-        ExifInterface.ORIENTATION_ROTATE_90 -> 90f
-        ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-        ExifInterface.ORIENTATION_ROTATE_270 -> 270f
-        else -> 0f
+fun loadBitmap(f: File, maxDim: Int): Bitmap? =
+    runCatching { decodeSampled(VaultCrypto.readBytes(f), maxDim) }.getOrNull()
+
+// ============================================================ video: decrypting data source
+
+class VaultDataSource : BaseDataSource(false) {
+    private var reader: VaultReader? = null
+    private var currentUri: Uri? = null
+    private var position = 0L
+    private var remaining = 0L
+    private var opened = false
+
+    override fun open(dataSpec: DataSpec): Long {
+        currentUri = dataSpec.uri
+        transferInitializing(dataSpec)
+        val r = VaultCrypto.openReader(File(dataSpec.uri.path!!))
+        reader = r
+        position = dataSpec.position
+        if (position > r.size) {
+            r.close()
+            reader = null
+            throw IOException("Position out of range")
+        }
+        remaining = if (dataSpec.length == C.LENGTH_UNSET.toLong()) r.size - position
+        else minOf(dataSpec.length, r.size - position)
+        opened = true
+        transferStarted(dataSpec)
+        return remaining
     }
-    if (deg == 0f) bmp
-    else Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(deg) }, true)
-}.getOrNull()
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (length == 0) return 0
+        if (remaining == 0L) return C.RESULT_END_OF_INPUT
+        val n = reader!!.readAt(position, buffer, offset, minOf(length.toLong(), remaining).toInt())
+        if (n <= 0) return C.RESULT_END_OF_INPUT
+        position += n
+        remaining -= n
+        bytesTransferred(n)
+        return n
+    }
+
+    override fun getUri(): Uri? = currentUri
+
+    override fun close() {
+        try {
+            reader?.close()
+        } finally {
+            reader = null
+            currentUri = null
+            if (opened) {
+                opened = false
+                transferEnded()
+            }
+        }
+    }
+}
