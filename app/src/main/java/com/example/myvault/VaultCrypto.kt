@@ -1,508 +1,1582 @@
+@file:OptIn(
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    androidx.media3.common.util.UnstableApi::class
+)
+
 package com.example.myvault
 
-import android.content.Context
+import android.content.ContentValues
+import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Matrix
-import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Bundle
 import android.os.Environment
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
-import android.util.Base64
-import androidx.exifinterface.media.ExifInterface
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
-import java.io.Closeable
-import java.io.DataInputStream
-import java.io.DataOutputStream
+import android.provider.MediaStore
+import android.provider.Settings
+import android.util.LruCache
+import android.view.WindowManager
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.NavigationDrawerItemDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.IntentCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.datasource.BaseDataSource
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
-import java.io.InputStream
-import java.io.OutputStream
-import java.io.RandomAccessFile
-import java.nio.ByteBuffer
-import java.security.KeyStore
-import java.security.MessageDigest
-import java.security.SecureRandom
-import javax.crypto.Cipher
-import javax.crypto.CipherInputStream
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.SecretKeyFactory
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.PBEKeySpec
-import javax.crypto.spec.SecretKeySpec
-import kotlin.math.min
+import java.math.BigDecimal
+import java.math.MathContext
 
-// ------------------------------------------------------------ file format
-// New format (.vlx): "VLX1" | fileId(8) | plainSize(8) | chunks...
-// Each chunk = AES-256-GCM of up to 128 KB (+16 byte tag), IV = fileId + chunk index.
-// This allows streaming and seeking (video playback) without loading the whole file.
+// ============================================================ theme
 
-internal const val CHUNK = 128 * 1024
-internal const val HEADER = 20L
-private const val THUMB = 360
-internal val MAGIC: ByteArray = "VLX1".toByteArray()
+private const val APP_NAME = "Anshu Jainam Namya"
 
-internal fun chunkIv(fileId: ByteArray, idx: Long): ByteArray =
-    ByteBuffer.allocate(12).put(fileId).putInt(idx.toInt()).array()
+internal val Bg = Color(0xFF0A0E1A)
+internal val Surf = Color(0xFF131A2B)
+internal val Accent1 = Color(0xFF7C5CFF)
+internal val Accent2 = Color(0xFF4F8CFF)
+internal val TextPri = Color(0xFFF2F4FA)
+internal val TextSec = Color(0xFF8E98B3)
+internal val Danger = Color(0xFFFF5C7A)
+internal val AccentBrush = Brush.linearGradient(listOf(Accent1, Accent2))
 
-class ItemInfo(val isVideo: Boolean, val mime: String, val thumb: Bitmap?)
+private val VaultColors = darkColorScheme(
+    primary = Accent1,
+    onPrimary = Color.White,
+    background = Bg,
+    onBackground = TextPri,
+    surface = Surf,
+    onSurface = TextPri
+)
 
-/** Random-access decrypting reader for .vlx files. */
-class VaultReader(file: File, private val key: SecretKey) : Closeable {
-    private val raf = RandomAccessFile(file, "r")
-    private val fileId = ByteArray(8)
-    var size: Long = 0L
-        private set
-    private var cachedIdx = -1L
-    private var cached = ByteArray(0)
+object ThumbCache {
+    private val cache = object : LruCache<String, ItemInfo>((Runtime.getRuntime().maxMemory() / 8).toInt()) {
+        override fun sizeOf(key: String, value: ItemInfo) = value.thumb?.byteCount ?: 1024
+    }
+    fun get(k: String): ItemInfo? = cache.get(k)
+    fun put(k: String, v: ItemInfo) { cache.put(k, v) }
+    fun clear() = cache.evictAll()
+}
 
-    init {
-        try {
-            val magic = ByteArray(4)
-            raf.readFully(magic)
-            if (!magic.contentEquals(MAGIC)) throw IOException("Not a vault file")
-            raf.readFully(fileId)
-            size = raf.readLong()
-        } catch (e: Throwable) {
-            raf.close()
-            throw e
+// ============================================================ activity
+
+class MainActivity : ComponentActivity() {
+
+    private var pinSet by mutableStateOf(false)
+    private var unlocked by mutableStateOf(false)
+    private var hasAllFiles by mutableStateOf(false)
+    private var photos by mutableStateOf<List<File>>(emptyList())
+    private var viewIndex by mutableStateOf<Int?>(null)
+    private var busyText by mutableStateOf<String?>(null)
+    private var calcKey by mutableIntStateOf(0)
+
+    // Sections: 0 = photos & videos, 1 = notes, 2 = recovery code
+    private var section by mutableIntStateOf(0)
+
+    // Notes
+    private var notes by mutableStateOf<List<NoteRow>>(emptyList())
+    private var notesUnlocked by mutableStateOf(false)
+    private var notesPasswordOpen by mutableStateOf(false)
+    private var newNoteAfterUnlock by mutableStateOf(false)
+    private var editing by mutableStateOf<NoteDraft?>(null)
+
+    // Recovery code
+    private var recoveryCode by mutableStateOf<String?>(null)
+    private var recoveryBanner by mutableStateOf(false)
+
+    private val pendingShared = mutableListOf<Uri>()
+    private val pendingDelete = mutableListOf<Uri>()
+    private var importing = 0
+    private var suppressLock = false // true only while a system dialog/picker is on top
+
+    private val deleteLauncher =
+        registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
+            suppressLock = false
+        }
+
+    private val picker =
+        registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(50)) { uris ->
+            suppressLock = false
+            if (uris.isNotEmpty()) importUris(uris, deleteOriginals = false)
+        }
+
+    // ------------------------------------------------------------ lifecycle
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
+        pinSet = VaultCrypto.isPinSet(this)
+        if (savedInstanceState == null) handleIntent(intent)
+
+        setContent {
+            MaterialTheme(colorScheme = VaultColors) {
+                var toDelete by remember { mutableStateOf<File?>(null) }
+                var confirmNoteDelete by remember { mutableStateOf(false) }
+                var confirmNewCode by remember { mutableStateOf(false) }
+                val drawerState = rememberDrawerState(DrawerValue.Closed)
+                val uiScope = rememberCoroutineScope()
+                val isUnlocked = unlocked
+                // Screenshots and Recents preview are blocked only while the vault is on screen
+                SideEffect { setSecure(isUnlocked) }
+                LaunchedEffect(isUnlocked) {
+                    if (!isUnlocked) drawerState.snapTo(DrawerValue.Closed)
+                }
+
+                Box(Modifier.fillMaxSize().background(if (isUnlocked) Bg else Color.Black)) {
+                    when {
+                        !isUnlocked -> Box(Modifier.fillMaxSize().systemBarsPadding()) {
+                            key(calcKey) {
+                                CalculatorScreen(
+                                    setupMode = !pinSet,
+                                    hasAllFiles = hasAllFiles,
+                                    onSetup = { pin -> doSetup(pin) },
+                                    onUnlock = { pin -> tryUnlock(pin) },
+                                    onRecover = { code, pin -> doRecover(code, pin) },
+                                    onGrant = {
+                                        suppressLock = true // not unlocked yet, so this is safe
+                                        openAllFilesSettings()
+                                    }
+                                )
+                            }
+                        }
+
+                        !hasAllFiles -> Box(Modifier.fillMaxSize().systemBarsPadding()) {
+                            PermissionScreen { openAllFilesSettings() }
+                        }
+
+                        else -> ModalNavigationDrawer(
+                            drawerState = drawerState,
+                            drawerContent = {
+                                ModalDrawerSheet(drawerContainerColor = Surf) {
+                                    Row(
+                                        Modifier.padding(start = 24.dp, end = 24.dp, top = 32.dp, bottom = 24.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        AppBadge(48.dp)
+                                        Spacer(Modifier.width(14.dp))
+                                        Text(
+                                            APP_NAME,
+                                            color = TextPri, fontSize = 17.sp, fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                    val itemColors = NavigationDrawerItemDefaults.colors(
+                                        selectedContainerColor = Accent1.copy(alpha = 0.25f),
+                                        unselectedContainerColor = Color.Transparent,
+                                        selectedIconColor = Accent1,
+                                        unselectedIconColor = TextSec,
+                                        selectedTextColor = TextPri,
+                                        unselectedTextColor = TextSec
+                                    )
+                                    NavigationDrawerItem(
+                                        label = { Text("Photos & Videos") },
+                                        icon = { Icon(Icons.Filled.Lock, null) },
+                                        selected = section == 0,
+                                        onClick = {
+                                            selectSection(0)
+                                            uiScope.launch { drawerState.close() }
+                                        },
+                                        modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
+                                        colors = itemColors
+                                    )
+                                    NavigationDrawerItem(
+                                        label = { Text("Notes") },
+                                        icon = { Icon(Icons.Filled.Edit, null) },
+                                        selected = section == 1,
+                                        onClick = {
+                                            selectSection(1)
+                                            uiScope.launch { drawerState.close() }
+                                        },
+                                        modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
+                                        colors = itemColors
+                                    )
+                                    NavigationDrawerItem(
+                                        label = { Text("Recovery code") },
+                                        icon = { Icon(Icons.Filled.Info, null) },
+                                        selected = section == 2,
+                                        onClick = {
+                                            selectSection(2)
+                                            uiScope.launch { drawerState.close() }
+                                        },
+                                        modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
+                                        colors = itemColors
+                                    )
+                                }
+                            }
+                        ) {
+                            Box(Modifier.fillMaxSize().systemBarsPadding()) {
+                                when (section) {
+                                    0 -> VaultScreen(
+                                        photos = photos,
+                                        busyText = busyText,
+                                        onMenu = { uiScope.launch { drawerState.open() } },
+                                        onAdd = {
+                                            suppressLock = true
+                                            picker.launch(
+                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                                            )
+                                        },
+                                        onLock = { lockNow() },
+                                        onOpen = { viewIndex = it }
+                                    )
+
+                                    1 -> NotesScreen(
+                                        notes = notes,
+                                        unlocked = notesUnlocked,
+                                        onMenu = { uiScope.launch { drawerState.open() } },
+                                        onTitleLongPress = { onNotesTitleLongPress() },
+                                        onAdd = {
+                                            if (notesUnlocked) {
+                                                editing = NoteDraft(null, "", "")
+                                            } else {
+                                                newNoteAfterUnlock = true
+                                                notesPasswordOpen = true
+                                            }
+                                        },
+                                        onOpen = { row ->
+                                            row.data?.let { editing = NoteDraft(row.id, it.title, it.body) }
+                                        }
+                                    )
+
+                                    else -> RecoveryScreen(
+                                        code = recoveryCode,
+                                        banner = recoveryBanner,
+                                        onMenu = { uiScope.launch { drawerState.open() } },
+                                        onNewCode = { confirmNewCode = true }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    val vi = viewIndex
+                    if (isUnlocked && hasAllFiles && section == 0 && vi != null && photos.isNotEmpty()) {
+                        Viewer(
+                            photos = photos,
+                            startIndex = vi,
+                            onClose = { viewIndex = null },
+                            onRestore = { restoreToGallery(it) },
+                            onDelete = { toDelete = it }
+                        )
+                    }
+
+                    val ed = editing
+                    if (isUnlocked && notesUnlocked && ed != null) {
+                        NoteEditor(
+                            draft = ed,
+                            onClose = { closeEditor() },
+                            onSave = { saveDraftManually() },
+                            onDelete = { confirmNoteDelete = true }
+                        )
+                    }
+
+                    if (isUnlocked && notesPasswordOpen) {
+                        NotesPasswordPage(
+                            setup = !NotesCrypto.isSet(this@MainActivity),
+                            onSetup = { pw -> notesSetup(pw) },
+                            onUnlock = { pw -> notesUnlock(pw) },
+                            onCancel = {
+                                notesPasswordOpen = false
+                                newNoteAfterUnlock = false
+                            }
+                        )
+                    }
+
+                    toDelete?.let { f ->
+                        AlertDialog(
+                            onDismissRequest = { toDelete = null },
+                            containerColor = Surf,
+                            title = { Text("Delete permanently?") },
+                            text = { Text("This item will be gone for good. This cannot be undone.", color = TextSec) },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    toDelete = null
+                                    deleteFromVault(f)
+                                }) { Text("Delete", color = Danger) }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { toDelete = null }) { Text("Cancel", color = TextSec) }
+                            }
+                        )
+                    }
+
+                    if (confirmNoteDelete && ed != null) {
+                        AlertDialog(
+                            onDismissRequest = { confirmNoteDelete = false },
+                            containerColor = Surf,
+                            title = { Text("Delete this note?") },
+                            text = { Text("It will be gone for good. This cannot be undone.", color = TextSec) },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    confirmNoteDelete = false
+                                    deleteEditingNote()
+                                }) { Text("Delete", color = Danger) }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { confirmNoteDelete = false }) { Text("Cancel", color = TextSec) }
+                            }
+                        )
+                    }
+
+                    if (confirmNewCode) {
+                        AlertDialog(
+                            onDismissRequest = { confirmNewCode = false },
+                            containerColor = Surf,
+                            title = { Text("Create a new code?") },
+                            text = {
+                                Text(
+                                    "Your old recovery code will stop working. Make sure to write the new one down.",
+                                    color = TextSec
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    confirmNewCode = false
+                                    makeNewRecoveryCode()
+                                }) { Text("Create", color = Accent1) }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { confirmNewCode = false }) { Text("Cancel", color = TextSec) }
+                            }
+                        )
+                    }
+                }
+            }
         }
     }
 
-    @Synchronized
-    fun readAt(pos: Long, buf: ByteArray, off: Int, len: Int): Int {
-        if (pos >= size) return -1
-        if (len == 0) return 0
-        val idx = pos / CHUNK
-        val chunk = load(idx)
-        val co = (pos - idx * CHUNK).toInt()
-        val n = minOf(len, chunk.size - co)
-        System.arraycopy(chunk, co, buf, off, n)
+    private fun setSecure(on: Boolean) {
+        if (on) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    }
+
+    private fun openAllFilesSettings() {
+        startActivity(
+            Intent(
+                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:$packageName")
+            )
+        )
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        suppressLock = false
+        hasAllFiles = Environment.isExternalStorageManager()
+        flushDeletes()
+        if (unlocked && hasAllFiles) afterUnlock()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Leaving the app (Home / Recents / screen off) locks the vault and the notes
+        if (!suppressLock) lockNow()
+    }
+
+    // ------------------------------------------------------------ lock / unlock
+
+    private fun lockNow() {
+        lockNotes(refresh = false)
+        section = 0
+        recoveryCode = null
+        recoveryBanner = false
+        unlocked = false
+        viewIndex = null
+        calcKey++ // clears whatever was typed on the calculator
+        ThumbCache.clear()
+        // If an import is still running, the key is cleared as soon as it finishes
+        if (importing == 0) VaultCrypto.lock()
+    }
+
+    private suspend fun tryUnlock(pin: String): Boolean {
+        if (VaultCrypto.lockoutMs(this) > 0) return false
+        val ok = withContext(Dispatchers.Default) { VaultCrypto.unlock(this@MainActivity, pin) }
+        if (ok) {
+            unlocked = true
+            afterUnlock()
+        }
+        return ok
+    }
+
+    private suspend fun doSetup(pin: String) {
+        withContext(Dispatchers.Default) { VaultCrypto.setupPin(this@MainActivity, pin) }
+        pinSet = true
+        unlocked = true
+        afterUnlock()
+    }
+
+    // Returns an error message, or null if the vault was restored
+    private suspend fun doRecover(code: String, pin: String): String? {
+        return when (withContext(Dispatchers.Default) { VaultCrypto.recoverWithCode(this@MainActivity, code, pin) }) {
+            VaultCrypto.RecoverResult.OK -> {
+                pinSet = true
+                unlocked = true
+                afterUnlock()
+                null
+            }
+            VaultCrypto.RecoverResult.NO_FILE -> "No recovery file found. The .MyVault folder must still be on this phone."
+            VaultCrypto.RecoverResult.BAD_CODE -> "That code doesn't match. Check it and try again."
+        }
+    }
+
+    private fun afterUnlock() {
+        hasAllFiles = Environment.isExternalStorageManager()
+        if (!hasAllFiles) return
+        lifecycleScope.launch {
+            photos = withContext(Dispatchers.IO) { listSorted() }
+            val result = withContext(Dispatchers.IO) {
+                runCatching { VaultCrypto.ensureRecovery(this@MainActivity) }.getOrNull()
+            }
+            if (result != null) {
+                recoveryCode = result.second
+                if (result.first) {
+                    // First time: show the new code straight away
+                    recoveryBanner = true
+                    section = 2
+                }
+            }
+            processPending()
+        }
+    }
+
+    private fun listSorted() = VaultCrypto.listItems().sortedByDescending { it.lastModified() }
+
+    // ------------------------------------------------------------ sections / recovery
+
+    private fun selectSection(i: Int) {
+        if (section == 1 && i != 1) lockNotes()
+        if (i != 2) recoveryBanner = false
+        section = i
+        if (i == 1) refreshNotes()
+        if (i == 2) {
+            lifecycleScope.launch {
+                recoveryCode = withContext(Dispatchers.IO) { VaultCrypto.recoveryCode(this@MainActivity) }
+            }
+        }
+    }
+
+    private fun makeNewRecoveryCode() {
+        lifecycleScope.launch {
+            val c = withContext(Dispatchers.IO) {
+                runCatching { VaultCrypto.createRecovery(this@MainActivity) }.getOrNull()
+            }
+            if (c != null) {
+                recoveryCode = c
+                recoveryBanner = true
+            } else {
+                Toast.makeText(this@MainActivity, "Could not create a new code", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ notes
+
+    private fun refreshNotes() {
+        lifecycleScope.launch {
+            notes = withContext(Dispatchers.IO) { NotesCrypto.list(this@MainActivity) }
+        }
+    }
+
+    // Press and hold the "Notes" title: opens the password page, or locks the notes again
+    private fun onNotesTitleLongPress() {
+        if (notesUnlocked) lockNotes() else notesPasswordOpen = true
+    }
+
+    private fun lockNotes(refresh: Boolean = true) {
+        saveDraftNow() // never lose what was being typed
+        NotesCrypto.lock()
+        notesUnlocked = false
+        notesPasswordOpen = false
+        newNoteAfterUnlock = false
+        editing = null
+        notes = notes.map { NoteRow(it.id, it.modified, it.cipher, null) } // drop readable text from memory
+        if (refresh) refreshNotes()
+    }
+
+    private suspend fun notesSetup(pw: String) {
+        withContext(Dispatchers.Default) { NotesCrypto.setPassword(this@MainActivity, pw) }
+        onNotesUnlocked()
+    }
+
+    private suspend fun notesUnlock(pw: String): String? {
+        val wait = NotesCrypto.lockoutMs(this)
+        if (wait > 0) return "Too many attempts. Try again in ${(wait + 999) / 1000}s"
+        val ok = withContext(Dispatchers.Default) { NotesCrypto.unlock(this@MainActivity, pw) }
+        if (ok) {
+            onNotesUnlocked()
+            return null
+        }
+        val w2 = NotesCrypto.lockoutMs(this)
+        return if (w2 > 0) "Too many attempts. Try again in ${(w2 + 999) / 1000}s" else "Incorrect password"
+    }
+
+    private fun onNotesUnlocked() {
+        notesUnlocked = true
+        notesPasswordOpen = false
+        refreshNotes()
+        if (newNoteAfterUnlock) {
+            newNoteAfterUnlock = false
+            editing = NoteDraft(null, "", "")
+        }
+    }
+
+    private fun saveDraftNow(): Boolean {
+        val d = editing ?: return false
+        if (!NotesCrypto.isUnlocked()) return false
+        if (d.id == null && d.title.isBlank() && d.body.isBlank()) return false
+        val ok = runCatching { NotesCrypto.save(this, d.id, d.title, d.body) }
+        ok.onSuccess { d.id = it }
+        return ok.isSuccess
+    }
+
+    private fun saveDraftManually() {
+        val saved = saveDraftNow()
+        Toast.makeText(
+            this,
+            if (saved) "Note saved" else "Nothing to save",
+            Toast.LENGTH_SHORT
+        ).show()
+        if (saved) refreshNotes()
+    }
+
+    private fun closeEditor() {
+        saveDraftNow()
+        editing = null
+        refreshNotes()
+    }
+
+    private fun deleteEditingNote() {
+        val d = editing ?: return
+        d.id?.let { NotesCrypto.delete(this, it) }
+        editing = null
+        refreshNotes()
+    }
+
+    // ------------------------------------------------------------ import (Share)
+
+    private fun handleIntent(i: Intent?) {
+        if (i == null) return
+        val list: List<Uri> = when (i.action) {
+            Intent.ACTION_SEND ->
+                listOfNotNull(IntentCompat.getParcelableExtra(i, Intent.EXTRA_STREAM, Uri::class.java))
+            Intent.ACTION_SEND_MULTIPLE ->
+                IntentCompat.getParcelableArrayListExtra(i, Intent.EXTRA_STREAM, Uri::class.java)
+                    ?: emptyList()
+            else -> emptyList()
+        }
+        if (list.isNotEmpty()) {
+            pendingShared.addAll(list)
+            processPending()
+        }
+    }
+
+    // Shared items wait here until the vault is opened
+    private fun processPending() {
+        if (!unlocked || !hasAllFiles || pendingShared.isEmpty()) return
+        val uris = pendingShared.toList()
+        pendingShared.clear()
+        importUris(uris, deleteOriginals = true)
+    }
+
+    private fun importUris(uris: List<Uri>, deleteOriginals: Boolean) {
+        if (!unlocked || !hasAllFiles) return
+        lifecycleScope.launch {
+            importing++
+            val done = ArrayList<Uri>()
+            var failed = 0
+            try {
+                for ((i, u) in uris.withIndex()) {
+                    busyText = "Importing ${i + 1} of ${uris.size}…"
+                    val ok = withContext(Dispatchers.IO) {
+                        runCatching { VaultCrypto.importMedia(this@MainActivity, u) }.isSuccess
+                    }
+                    if (ok) {
+                        done.add(u)
+                        photos = withContext(Dispatchers.IO) { listSorted() }
+                    } else failed++
+                }
+            } finally {
+                busyText = null
+                importing--
+                if (importing == 0 && !unlocked) VaultCrypto.lock()
+            }
+            if (failed > 0) {
+                Toast.makeText(this@MainActivity, "$failed file(s) could not be imported", Toast.LENGTH_LONG).show()
+            }
+            if (deleteOriginals) {
+                pendingDelete.addAll(done.filter { it.authority == "media" })
+                if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) flushDeletes()
+            }
+        }
+    }
+
+    private fun flushDeletes() {
+        if (pendingDelete.isEmpty()) return
+        val l = pendingDelete.toList()
+        pendingDelete.clear()
+        requestDelete(l)
+    }
+
+    // Android asks the user once to confirm removing the originals from Gallery
+    private fun requestDelete(uris: List<Uri>) {
+        runCatching {
+            val pi = MediaStore.createDeleteRequest(contentResolver, uris)
+            suppressLock = true
+            deleteLauncher.launch(IntentSenderRequest.Builder(pi.intentSender).build())
+        }.onFailure { suppressLock = false }
+    }
+
+    // ------------------------------------------------------------ restore / delete
+
+    private fun deleteFromVault(f: File) {
+        VaultCrypto.deleteItem(f)
+        photos = photos - f
+        if (photos.isEmpty()) viewIndex = null
+    }
+
+    private fun restoreToGallery(f: File) {
+        lifecycleScope.launch {
+            busyText = "Restoring…"
+            val ok = withContext(Dispatchers.IO) { restore(f) }
+            busyText = null
+            if (ok) {
+                photos = photos - f
+                if (photos.isEmpty()) viewIndex = null
+                Toast.makeText(this@MainActivity, "Restored to Gallery", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this@MainActivity, "Restore failed", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun restore(f: File): Boolean = runCatching {
+        val info = VaultCrypto.info(f)
+        val mime = info.mime
+        val ext = when (val sub = mime.substringAfter('/').substringBefore(';')) {
+            "jpeg" -> "jpg"
+            "quicktime" -> "mov"
+            "x-matroska" -> "mkv"
+            "3gpp" -> "3gp"
+            else -> sub
+        }
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, "Restored_${System.currentTimeMillis()}.$ext")
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            put(
+                MediaStore.MediaColumns.RELATIVE_PATH,
+                if (info.isVideo) "Movies/Restored" else "Pictures/Restored"
+            )
+        }
+        val collection = if (info.isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        val uri = contentResolver.insert(collection, values)
+            ?: throw IllegalStateException("insert failed")
+        try {
+            contentResolver.openOutputStream(uri)!!.use { VaultCrypto.copyDecrypted(f, it) }
+        } catch (e: Throwable) {
+            contentResolver.delete(uri, null, null)
+            throw e
+        }
+        VaultCrypto.deleteItem(f) // remove from vault only after the Gallery copy is written
+        true
+    }.getOrDefault(false)
+}
+
+// ============================================================ calculator (the disguise)
+
+private val CalcBg = Color(0xFF000000)
+private val CalcKey = Color(0xFF2B2B2F)
+private val CalcFn = Color(0xFF4A4A50)
+private val CalcOp = Color(0xFFFF9500)
+private val CalcGray = Color(0xFF8E8E93)
+private const val OPS = "+−×÷"
+
+@Composable
+fun CalculatorScreen(
+    setupMode: Boolean,
+    hasAllFiles: Boolean,
+    onSetup: suspend (String) -> Unit,
+    onUnlock: suspend (String) -> Boolean,
+    onRecover: suspend (String, String) -> String?,
+    onGrant: () -> Unit
+) {
+    var expr by remember { mutableStateOf("") }
+    var shown by remember { mutableStateOf("") }
+    var evaluated by remember { mutableStateOf(false) }
+    var first by remember { mutableStateOf<String?>(null) }
+    var showRecover by remember { mutableStateOf(false) }
+    var hint by remember {
+        mutableStateOf<String?>(
+            if (setupMode) "Set a password: type 4-8 digits, then press =\nRestoring? Press and hold the numbers."
+            else null
+        )
+    }
+    val scope = rememberCoroutineScope()
+
+    fun clearAll() {
+        expr = ""
+        shown = ""
+        evaluated = false
+    }
+
+    fun onDigit(c: String) {
+        if (evaluated || expr == "Error") {
+            expr = if (c == ".") "0." else c
+            shown = ""
+            evaluated = false
+            return
+        }
+        if (expr.length >= 40) return
+        if (c == ".") {
+            val seg = expr.takeLastWhile { it.isDigit() || it == '.' }
+            if (seg.contains('.')) return
+            expr += if (seg.isEmpty()) "0." else "."
+            return
+        }
+        val last = expr.lastOrNull()
+        expr += if (last == ')' || last == '%') "×$c" else c
+    }
+
+    fun onOp(o: String) {
+        if (expr == "Error") return
+        if (evaluated) {
+            evaluated = false
+            shown = ""
+        }
+        if (expr.isEmpty()) {
+            if (o == "−") expr = "−"
+            return
+        }
+        val last = expr.last()
+        when {
+            o == "−" && (last == '×' || last == '÷') -> expr += o
+            OPS.contains(last) -> {
+                if (expr.length == 1) return
+                expr = expr.dropLast(1) + o
+            }
+            last == '(' -> if (o == "−") expr += o
+            else -> expr += o
+        }
+    }
+
+    fun onPercent() {
+        if (expr == "Error" || expr.isEmpty()) return
+        if (evaluated) {
+            evaluated = false
+            shown = ""
+        }
+        val last = expr.last()
+        if (last.isDigit() || last == ')' || last == '%') expr += "%"
+    }
+
+    fun onParen() {
+        if (evaluated || expr == "Error") {
+            expr = "("
+            shown = ""
+            evaluated = false
+            return
+        }
+        val open = expr.count { it == '(' }
+        val close = expr.count { it == ')' }
+        val last = expr.lastOrNull()
+        val valueEnd = last != null && (last.isDigit() || last == ')' || last == '%')
+        expr += when {
+            open > close && valueEnd -> ")"
+            valueEnd || last == '.' -> "×("
+            else -> "("
+        }
+    }
+
+    fun onBack() {
+        if (evaluated || expr == "Error") {
+            clearAll()
+            return
+        }
+        expr = expr.dropLast(1)
+    }
+
+    fun onEquals() {
+        if (evaluated || expr == "Error" || expr.isEmpty()) return
+        val e = expr
+        if (e.all { it.isDigit() }) {
+            if (setupMode) {
+                if (e.length < 4 || e.length > 8) {
+                    hint = "Password must be 4 to 8 digits"
+                    expr = ""
+                    return
+                }
+                val f = first
+                when {
+                    f == null -> {
+                        first = e
+                        expr = ""
+                        hint = "Confirm your password, then press ="
+                    }
+                    f == e -> {
+                        expr = ""
+                        hint = null
+                        scope.launch { onSetup(e) }
+                    }
+                    else -> {
+                        first = null
+                        expr = ""
+                        hint = "Passwords did not match. Enter a password, then press ="
+                    }
+                }
+                return
+            }
+            if (e.length in 4..8) {
+                scope.launch {
+                    if (onUnlock(e)) {
+                        clearAll()
+                    } else {
+                        // Wrong code: behave exactly like a normal calculator
+                        shown = e
+                        evaluated = true
+                    }
+                }
+                return
+            }
+        }
+        val r = calcEvaluate(e)
+        shown = e
+        expr = r ?: "Error"
+        evaluated = true
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().background(CalcBg).padding(horizontal = 16.dp)) {
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .pointerInput(Unit) { detectTapGestures(onLongPress = { showRecover = true }) }
+                    .padding(bottom = 8.dp),
+                verticalArrangement = Arrangement.Bottom,
+                horizontalAlignment = Alignment.End
+            ) {
+                val h = hint
+                if (h != null) {
+                    Text(
+                        h,
+                        color = CalcGray, fontSize = 13.sp, textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+                    )
+                }
+                if (shown.isNotEmpty()) {
+                    Text(shown, color = CalcGray, fontSize = 22.sp, maxLines = 1)
+                }
+                val big = if (expr.isEmpty()) "0" else expr
+                Text(
+                    big,
+                    color = Color.White,
+                    fontSize = when {
+                        big.length > 14 -> 34.sp
+                        big.length > 9 -> 48.sp
+                        else -> 64.sp
+                    },
+                    maxLines = 2,
+                    textAlign = TextAlign.End
+                )
+            }
+
+            CalcRow {
+                CalcButton("AC", CalcFn) { clearAll() }
+                CalcButton("( )", CalcFn) { onParen() }
+                CalcButton("%", CalcFn) { onPercent() }
+                CalcButton("÷", CalcOp) { onOp("÷") }
+            }
+            CalcRow {
+                CalcButton("7", CalcKey) { onDigit("7") }
+                CalcButton("8", CalcKey) { onDigit("8") }
+                CalcButton("9", CalcKey) { onDigit("9") }
+                CalcButton("×", CalcOp) { onOp("×") }
+            }
+            CalcRow {
+                CalcButton("4", CalcKey) { onDigit("4") }
+                CalcButton("5", CalcKey) { onDigit("5") }
+                CalcButton("6", CalcKey) { onDigit("6") }
+                CalcButton("−", CalcOp) { onOp("−") }
+            }
+            CalcRow {
+                CalcButton("1", CalcKey) { onDigit("1") }
+                CalcButton("2", CalcKey) { onDigit("2") }
+                CalcButton("3", CalcKey) { onDigit("3") }
+                CalcButton("+", CalcOp) { onOp("+") }
+            }
+            CalcRow {
+                CalcButton("←", CalcFn) { onBack() }
+                CalcButton("0", CalcKey) { onDigit("0") }
+                CalcButton(".", CalcKey) { onDigit(".") }
+                CalcButton("=", CalcOp) { onEquals() }
+            }
+            Spacer(Modifier.height(4.dp))
+        }
+
+        if (showRecover) {
+            RecoverPage(
+                hasAllFiles = hasAllFiles,
+                onGrant = onGrant,
+                onRecover = onRecover,
+                onCancel = { showRecover = false }
+            )
+        }
+    }
+}
+
+@Composable
+private fun CalcRow(content: @Composable RowScope.() -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(bottom = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        content = content
+    )
+}
+
+@Composable
+private fun RowScope.CalcButton(label: String, bg: Color, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .weight(1f)
+            .aspectRatio(1f)
+            .clip(CircleShape)
+            .background(bg)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+/** Evaluates an expression like 12×15+3% . Returns null if it is invalid. */
+fun calcEvaluate(s: String): String? = try {
+    var t = s
+    while (t.isNotEmpty() && OPS.contains(t.last())) t = t.dropLast(1)
+    val missing = t.count { it == '(' } - t.count { it == ')' }
+    if (missing > 0) t += ")".repeat(missing)
+    if (t.isEmpty()) {
+        null
+    } else {
+        var r = CalcParser(t).parse().round(MathContext(15)).stripTrailingZeros()
+        if (r.signum() == 0) r = BigDecimal.ZERO
+        r.toPlainString().replace('-', '−')
+    }
+} catch (e: Exception) {
+    null
+}
+
+private class CalcParser(private val s: String) {
+    private var i = 0
+
+    fun parse(): BigDecimal {
+        val v = expr()
+        if (i != s.length) throw IllegalArgumentException("bad expression")
+        return v
+    }
+
+    private fun expr(): BigDecimal {
+        var v = term()
+        while (i < s.length && (s[i] == '+' || s[i] == '−')) {
+            val op = s[i++]
+            val start = i
+            val r = term()
+            val seg = s.substring(start, i)
+            // 200+10% means 200 + 10% of 200
+            val pct = seg.endsWith("%") && !seg.contains('×') && !seg.contains('÷')
+            val rr = if (pct) v.multiply(r) else r
+            v = if (op == '+') v.add(rr) else v.subtract(rr)
+        }
+        return v
+    }
+
+    private fun term(): BigDecimal {
+        var v = unary()
+        while (i < s.length && (s[i] == '×' || s[i] == '÷')) {
+            val op = s[i++]
+            val r = unary()
+            v = if (op == '×') {
+                v.multiply(r)
+            } else {
+                if (r.signum() == 0) throw ArithmeticException("divide by zero")
+                v.divide(r, MathContext(15))
+            }
+        }
+        return v
+    }
+
+    private fun unary(): BigDecimal {
+        if (i < s.length && s[i] == '−') {
+            i++
+            return unary().negate()
+        }
+        if (i < s.length && s[i] == '+') {
+            i++
+            return unary()
+        }
+        return postfix()
+    }
+
+    private fun postfix(): BigDecimal {
+        var v = primary()
+        while (i < s.length && s[i] == '%') {
+            i++
+            v = v.divide(BigDecimal(100))
+        }
+        return v
+    }
+
+    private fun primary(): BigDecimal {
+        if (i < s.length && s[i] == '(') {
+            i++
+            val v = expr()
+            if (i >= s.length || s[i] != ')') throw IllegalArgumentException("missing )")
+            i++
+            return v
+        }
+        val st = i
+        while (i < s.length && (s[i].isDigit() || s[i] == '.')) i++
+        if (st == i) throw IllegalArgumentException("number expected")
+        return BigDecimal(s.substring(st, i))
+    }
+}
+
+// ============================================================ common bits
+
+@Composable
+fun AppBadge(size: Dp) {
+    Box(
+        Modifier.size(size).clip(RoundedCornerShape(size * 0.3f)).background(AccentBrush),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(Icons.Filled.Lock, null, tint = Color.White, modifier = Modifier.size(size * 0.5f))
+    }
+}
+
+@Composable
+fun IconCircleButton(icon: ImageVector, accent: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .then(if (accent) Modifier.background(AccentBrush) else Modifier.background(Surf))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(icon, null, tint = Color.White, modifier = Modifier.size(22.dp))
+    }
+}
+
+@Composable
+fun GradientButton(text: String, icon: ImageVector?, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .height(52.dp)
+            .clip(RoundedCornerShape(26.dp))
+            .background(AccentBrush)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 28.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        if (icon != null) {
+            Icon(icon, null, tint = Color.White, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(text, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+    }
+}
+
+@Composable
+fun PillButton(
+    text: String,
+    icon: ImageVector,
+    modifier: Modifier,
+    accent: Boolean,
+    tint: Color = Color.White,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier
+            .height(52.dp)
+            .clip(RoundedCornerShape(26.dp))
+            .then(if (accent) Modifier.background(AccentBrush) else Modifier.background(tint.copy(alpha = 0.16f)))
+            .clickable(onClick = onClick),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, null, tint = if (accent) Color.White else tint, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(text, color = if (accent) Color.White else tint, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+fun PermissionScreen(onOpenSettings: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().padding(32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        AppBadge(72.dp)
+        Spacer(Modifier.height(24.dp))
+        Text("One last step", color = TextPri, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "Android needs \"All files access\" so your vault can keep its hidden .MyVault folder. " +
+                "Your files stay encrypted at all times.",
+            color = TextSec, fontSize = 14.sp, textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(28.dp))
+        GradientButton("Grant access", null, onOpenSettings)
+    }
+}
+
+// ============================================================ vault screen
+
+@Composable
+fun VaultScreen(
+    photos: List<File>,
+    busyText: String?,
+    onMenu: () -> Unit,
+    onAdd: () -> Unit,
+    onLock: () -> Unit,
+    onOpen: (Int) -> Unit
+) {
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconCircleButton(Icons.Filled.Menu, accent = false, onClick = onMenu)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(APP_NAME, color = TextPri, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Text(
+                    if (photos.isEmpty()) "Private vault" else "${photos.size} items  •  AES-256 encrypted",
+                    color = TextSec, fontSize = 12.sp, maxLines = 1
+                )
+            }
+            IconCircleButton(Icons.Filled.Add, accent = true, onClick = onAdd)
+            Spacer(Modifier.width(8.dp))
+            IconCircleButton(Icons.Filled.Lock, accent = false, onClick = onLock)
+        }
+
+        if (busyText != null) {
+            LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp), color = Accent1, trackColor = Surf)
+            Text(
+                busyText,
+                color = TextSec, fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+            )
+        } else {
+            Spacer(Modifier.height(2.dp))
+        }
+
+        if (photos.isEmpty()) {
+            EmptyState(onAdd)
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                itemsIndexed(photos, key = { _, f -> f.name }) { i, f -> Thumb(f) { onOpen(i) } }
+            }
+        }
+    }
+}
+
+@Composable
+fun EmptyState(onAdd: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().padding(40.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(Modifier.size(120.dp).clip(CircleShape).background(Surf), contentAlignment = Alignment.Center) {
+            Icon(Icons.Filled.Lock, null, tint = Accent1, modifier = Modifier.size(52.dp))
+        }
+        Spacer(Modifier.height(24.dp))
+        Text("Your vault is empty", color = TextPri, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Share photos and videos from your Gallery to this app, or tap below. They'll be locked away safely.",
+            color = TextSec, fontSize = 14.sp, textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(28.dp))
+        GradientButton("Add photos & videos", Icons.Filled.Add, onAdd)
+    }
+}
+
+@Composable
+fun PlayBadge(modifier: Modifier) {
+    Box(
+        modifier.size(28.dp).clip(CircleShape).background(Color(0x99000000)),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(Icons.Filled.PlayArrow, null, tint = Color.White, modifier = Modifier.size(18.dp))
+    }
+}
+
+@Composable
+fun Thumb(f: File, onClick: () -> Unit) {
+    val info by produceState<ItemInfo?>(ThumbCache.get(f.name), f) {
+        if (value == null) {
+            value = withContext(Dispatchers.IO) { runCatching { VaultCrypto.info(f) }.getOrNull() }
+                ?.also { ThumbCache.put(f.name, it) }
+        }
+    }
+    val i = info
+    Box(
+        Modifier
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Surf)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        val t = i?.thumb
+        if (t != null) {
+            Image(t.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        } else if (i != null) {
+            Icon(Icons.Filled.Lock, null, tint = TextSec, modifier = Modifier.size(28.dp))
+        }
+        if (i?.isVideo == true) PlayBadge(Modifier.align(Alignment.BottomStart).padding(6.dp))
+    }
+}
+
+// ============================================================ viewer
+
+@Composable
+fun Viewer(
+    photos: List<File>,
+    startIndex: Int,
+    onClose: () -> Unit,
+    onRestore: (File) -> Unit,
+    onDelete: (File) -> Unit
+) {
+    val pager = rememberPagerState(initialPage = startIndex.coerceIn(0, photos.size - 1)) { photos.size }
+    val current = photos.getOrNull(pager.currentPage)
+    BackHandler(onBack = onClose)
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        HorizontalPager(
+            state = pager,
+            modifier = Modifier.fillMaxSize(),
+            key = { photos.getOrNull(it)?.name ?: it }
+        ) { page ->
+            photos.getOrNull(page)?.let { MediaPage(it, active = pager.currentPage == page) }
+        }
+
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(Brush.verticalGradient(listOf(Color(0xB3000000), Color.Transparent)))
+                .statusBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconCircleButton(Icons.Filled.Close, accent = false, onClick = onClose)
+            Spacer(Modifier.weight(1f))
+            Text(
+                "${pager.currentPage + 1} / ${photos.size}",
+                color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium
+            )
+            Spacer(Modifier.width(12.dp))
+        }
+
+        Row(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000))))
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            PillButton("Restore", Icons.Filled.Refresh, Modifier.weight(1f), accent = true) {
+                current?.let(onRestore)
+            }
+            PillButton("Delete", Icons.Filled.Delete, Modifier.weight(1f), accent = false, tint = Danger) {
+                current?.let(onDelete)
+            }
+        }
+    }
+}
+
+@Composable
+fun MediaPage(f: File, active: Boolean) {
+    val info by produceState<ItemInfo?>(ThumbCache.get(f.name), f) {
+        if (value == null) {
+            val loaded = withContext(Dispatchers.IO) { runCatching { VaultCrypto.info(f) }.getOrNull() }
+                ?: ItemInfo(false, "image/jpeg", null)
+            ThumbCache.put(f.name, loaded)
+            value = loaded
+        }
+    }
+    val i = info
+    when {
+        i == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(color = Accent1)
+        }
+        i.isVideo && f.extension == "vlt" -> Box(
+            Modifier.fillMaxSize().padding(40.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "This video was saved by an older version of the app and can't be played here. " +
+                    "Tap Restore to move it back to your Gallery.",
+                color = Color.White, textAlign = TextAlign.Center
+            )
+        }
+        i.isVideo -> if (active) ActivePlayer(f) else Box(
+            Modifier.fillMaxSize().background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) { PlayBadge(Modifier) }
+        else -> ZoomableImage(f)
+    }
+}
+
+@Composable
+fun ActivePlayer(f: File) {
+    val ctx = LocalContext.current
+    val exo = remember(f) {
+        ExoPlayer.Builder(ctx).build().apply {
+            val src = ProgressiveMediaSource.Factory(DataSource.Factory { VaultDataSource() })
+                .createMediaSource(MediaItem.fromUri(Uri.fromFile(f)))
+            setMediaSource(src)
+            prepare()
+            playWhenReady = true
+        }
+    }
+    DisposableEffect(exo) { onDispose { exo.release() } }
+    AndroidView(
+        factory = { c ->
+            PlayerView(c).apply {
+                player = exo
+                useController = true
+            }
+        },
+        modifier = Modifier.fillMaxSize().padding(top = 64.dp, bottom = 84.dp)
+    )
+}
+
+@Composable
+fun ZoomableImage(f: File) {
+    val loaded by produceState<Pair<Boolean, Bitmap?>?>(null, f) {
+        value = true to withContext(Dispatchers.IO) { loadBitmap(f, 2048) }
+    }
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    var box by remember { mutableStateOf(IntSize.Zero) }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .onSizeChanged { box = it }
+            .pointerInput(Unit) {
+                detectTapGestures(onDoubleTap = {
+                    scale = if (scale > 1f) 1f else 2.5f
+                    offset = Offset.Zero
+                })
+            }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent()
+                        val multi = event.changes.size > 1
+                        if (multi || scale > 1f) {
+                            val zoom = event.calculateZoom()
+                            val pan = event.calculatePan()
+                            scale = (scale * zoom).coerceIn(1f, 5f)
+                            val maxX = box.width * (scale - 1f) / 2f
+                            val maxY = box.height * (scale - 1f) / 2f
+                            offset = if (scale <= 1f) Offset.Zero
+                            else Offset(
+                                (offset.x + pan.x).coerceIn(-maxX, maxX),
+                                (offset.y + pan.y).coerceIn(-maxY, maxY)
+                            )
+                            event.changes.forEach { if (it.positionChanged()) it.consume() }
+                        }
+                    } while (event.changes.any { it.pressed })
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        val l = loaded
+        val b = l?.second
+        when {
+            l == null -> CircularProgressIndicator(color = Accent1)
+            b == null -> Text("Can't display this file", color = TextSec)
+            else -> Image(
+                b.asImageBitmap(), null,
+                Modifier.fillMaxSize().graphicsLayer(
+                    scaleX = scale, scaleY = scale,
+                    translationX = offset.x, translationY = offset.y
+                ),
+                contentScale = ContentScale.Fit
+            )
+        }
+    }
+}
+
+// ============================================================ image decoding
+
+fun loadBitmap(f: File, maxDim: Int): Bitmap? =
+    runCatching { decodeSampled(VaultCrypto.readBytes(f), maxDim) }.getOrNull()
+
+// ============================================================ video: decrypting data source
+
+class VaultDataSource : BaseDataSource(false) {
+    private var reader: VaultReader? = null
+    private var currentUri: Uri? = null
+    private var position = 0L
+    private var remaining = 0L
+    private var opened = false
+
+    override fun open(dataSpec: DataSpec): Long {
+        currentUri = dataSpec.uri
+        transferInitializing(dataSpec)
+        val r = VaultCrypto.openReader(File(dataSpec.uri.path!!))
+        reader = r
+        position = dataSpec.position
+        if (position > r.size) {
+            r.close()
+            reader = null
+            throw IOException("Position out of range")
+        }
+        remaining = if (dataSpec.length == C.LENGTH_UNSET.toLong()) r.size - position
+        else minOf(dataSpec.length, r.size - position)
+        opened = true
+        transferStarted(dataSpec)
+        return remaining
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (length == 0) return 0
+        if (remaining == 0L) return C.RESULT_END_OF_INPUT
+        val n = reader!!.readAt(position, buffer, offset, minOf(length.toLong(), remaining).toInt())
+        if (n <= 0) return C.RESULT_END_OF_INPUT
+        position += n
+        remaining -= n
+        bytesTransferred(n)
         return n
     }
 
-    private fun load(idx: Long): ByteArray {
-        if (idx == cachedIdx) return cached
-        val plainLen = minOf(CHUNK.toLong(), size - idx * CHUNK).toInt()
-        val enc = ByteArray(plainLen + 16)
-        raf.seek(HEADER + idx * (CHUNK + 16))
-        raf.readFully(enc)
-        val c = Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, chunkIv(fileId, idx)))
-        cached = c.doFinal(enc)
-        cachedIdx = idx
-        return cached
-    }
+    override fun getUri(): Uri? = currentUri
 
-    fun readAll(): ByteArray {
-        if (size > Int.MAX_VALUE) throw IOException("File too large")
-        val out = ByteArray(size.toInt())
-        var p = 0
-        while (p < out.size) {
-            val n = readAt(p.toLong(), out, p, out.size - p)
-            if (n <= 0) throw IOException("Unexpected end of file")
-            p += n
-        }
-        return out
-    }
-
-    fun copyTo(out: OutputStream) {
-        val buf = ByteArray(CHUNK)
-        var pos = 0L
-        while (pos < size) {
-            val n = readAt(pos, buf, 0, buf.size)
-            if (n <= 0) throw IOException("Unexpected end of file")
-            out.write(buf, 0, n)
-            pos += n
-        }
-    }
-
-    override fun close() { raf.close() }
-}
-
-// ------------------------------------------------------------ image helpers
-
-/** Decodes with downsampling and fixes camera rotation. */
-fun decodeSampled(bytes: ByteArray, maxDim: Int): Bitmap? {
-    val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
-    if (o.outWidth <= 0 || o.outHeight <= 0) return null
-    var s = 1
-    while (o.outWidth / (s * 2) >= maxDim && o.outHeight / (s * 2) >= maxDim) s *= 2
-    val bmp = BitmapFactory.decodeByteArray(
-        bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = s }
-    ) ?: return null
-    val orientation = runCatching {
-        ExifInterface(ByteArrayInputStream(bytes))
-            .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-    }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
-    val deg = when (orientation) {
-        ExifInterface.ORIENTATION_ROTATE_90 -> 90f
-        ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-        ExifInterface.ORIENTATION_ROTATE_270 -> 270f
-        else -> 0f
-    }
-    return if (deg == 0f) bmp
-    else Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(deg) }, true)
-}
-
-private fun toJpeg(src: Bitmap): ByteArray {
-    val m = maxOf(src.width, src.height)
-    val b = if (m > THUMB) {
-        Bitmap.createScaledBitmap(
-            src,
-            (src.width * THUMB / m).coerceAtLeast(1),
-            (src.height * THUMB / m).coerceAtLeast(1),
-            true
-        )
-    } else src
-    val bos = ByteArrayOutputStream()
-    b.compress(Bitmap.CompressFormat.JPEG, 82, bos)
-    return bos.toByteArray()
-}
-
-private fun photoThumb(bytes: ByteArray): ByteArray? =
-    runCatching { decodeSampled(bytes, THUMB)?.let { toJpeg(it) } }.getOrNull()
-
-private fun videoThumb(ctx: Context, uri: Uri): ByteArray? = runCatching {
-    val r = MediaMetadataRetriever()
-    try {
-        r.setDataSource(ctx, uri)
-        val frame = r.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-        if (frame == null) null else toJpeg(frame)
-    } finally {
-        r.release()
-    }
-}.getOrNull()
-
-// ------------------------------------------------------------ vault
-
-/**
- * Every file is encrypted with a random master key.
- * The master key is wrapped by an Android Keystore key bound to the PIN.
- */
-object VaultCrypto {
-
-    private const val PREFS = "vault_prefs"
-    private const val KEY_SALT = "salt"
-    private const val KEY_VERIFIER = "verifier" // old versions only
-    private const val KEY_WRAPPED = "wrapped"
-    private const val KEY_FAILS = "fails"
-    private const val KEY_LAST_FAIL = "last_fail"
-    private const val KEY_LOCK_UNTIL = "lock_until"
-    private const val LEGACY_ITERATIONS = 150_000
-    private const val KS_ALIAS = "vault_wrap_key"
-
-    @Volatile
-    private var sessionKey: SecretKey? = null
-
-    private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    private fun b64(b: ByteArray): String = Base64.encodeToString(b, Base64.NO_WRAP)
-    private fun unb64(s: String): ByteArray = Base64.decode(s, Base64.NO_WRAP)
-
-    // ---------- Folder ----------
-
-    @Suppress("DEPRECATION")
-    fun vaultDir(): File {
-        val dir = File(Environment.getExternalStorageDirectory(), ".MyVault")
-        if (!dir.exists()) {
-            dir.mkdirs()
-            File(dir, ".nomedia").createNewFile() // hide from Gallery
-        }
-        return dir
-    }
-
-    // ---------- PIN setup / unlock ----------
-
-    fun isPinSet(ctx: Context): Boolean {
-        val p = prefs(ctx)
-        return p.contains(KEY_WRAPPED) || p.contains(KEY_VERIFIER)
-    }
-
-    fun setupPin(ctx: Context, pin: String) {
-        val master = ByteArray(32).also { SecureRandom().nextBytes(it) }
-        val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
-        wrapMaster(ctx, master, pin, salt)
-        prefs(ctx).edit().remove(KEY_VERIFIER).apply()
-        sessionKey = SecretKeySpec(master, "AES")
-    }
-
-    /** True if the PIN is right (vault unlocked). Do not call on the main thread. */
-    fun unlock(ctx: Context, pin: String): Boolean {
-        val p = prefs(ctx)
-        val master: ByteArray? = when {
-            p.contains(KEY_WRAPPED) -> unwrapMaster(ctx, pin)
-            p.contains(KEY_VERIFIER) -> legacyUnlock(ctx, pin)
-            else -> null
-        }
-        return if (master != null) {
-            sessionKey = SecretKeySpec(master, "AES")
-            resetFailures(ctx)
-            true
-        } else {
-            recordFailure(ctx)
-            false
-        }
-    }
-
-    fun lock() { sessionKey = null }
-
-    fun isUnlocked() = sessionKey != null
-
-    // ---------- Wrong-PIN lockout ----------
-
-    fun lockoutMs(ctx: Context): Long =
-        (prefs(ctx).getLong(KEY_LOCK_UNTIL, 0L) - System.currentTimeMillis()).coerceAtLeast(0L)
-
-    private fun recordFailure(ctx: Context) {
-        val p = prefs(ctx)
-        val now = System.currentTimeMillis()
-        // Old failures are forgotten after 6 hours, so normal calculator use never locks the vault
-        val old = if (now - p.getLong(KEY_LAST_FAIL, 0L) > 6L * 3600_000L) 0 else p.getInt(KEY_FAILS, 0)
-        val n = old + 1
-        val e = p.edit().putInt(KEY_FAILS, n).putLong(KEY_LAST_FAIL, now)
-        if (n >= 10) {
-            val waitMs = 30_000L * (1L shl min(n - 10, 6))
-            e.putLong(KEY_LOCK_UNTIL, now + waitMs)
-        }
-        e.apply()
-    }
-
-    private fun resetFailures(ctx: Context) {
-        prefs(ctx).edit().putInt(KEY_FAILS, 0).putLong(KEY_LOCK_UNTIL, 0L).apply()
-    }
-
-    // ---------- Master key wrapping (Android Keystore) ----------
-
-    private fun wrapKey(): SecretKey {
-        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (ks.getKey(KS_ALIAS, null) as? SecretKey)?.let { return it }
-        val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        gen.init(
-            KeyGenParameterSpec.Builder(
-                KS_ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .build()
-        )
-        return gen.generateKey()
-    }
-
-    private fun aad(pin: String, salt: ByteArray): ByteArray =
-        MessageDigest.getInstance("SHA-256").digest(salt + pin.toByteArray())
-
-    private fun wrapMaster(ctx: Context, master: ByteArray, pin: String, salt: ByteArray) {
-        val c = Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(Cipher.ENCRYPT_MODE, wrapKey())
-        c.updateAAD(aad(pin, salt))
-        val ct = c.doFinal(master)
-        prefs(ctx).edit()
-            .putString(KEY_WRAPPED, b64(c.iv) + ":" + b64(ct))
-            .putString(KEY_SALT, b64(salt))
-            .apply()
-    }
-
-    private fun unwrapMaster(ctx: Context, pin: String): ByteArray? = runCatching {
-        val p = prefs(ctx)
-        val parts = p.getString(KEY_WRAPPED, null)!!.split(":")
-        val salt = unb64(p.getString(KEY_SALT, null)!!)
-        val c = Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(Cipher.DECRYPT_MODE, wrapKey(), GCMParameterSpec(128, unb64(parts[0])))
-        c.updateAAD(aad(pin, salt))
-        c.doFinal(unb64(parts[1]))
-    }.getOrNull()
-
-    // ---------- Old-version migration (runs once, slow) ----------
-
-    private fun legacyUnlock(ctx: Context, pin: String): ByteArray? {
-        val p = prefs(ctx)
-        val salt = unb64(p.getString(KEY_SALT, null) ?: return null)
-        val spec = PBEKeySpec(pin.toCharArray(), salt, LEGACY_ITERATIONS, 256)
-        val key = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
-        val v = b64(MessageDigest.getInstance("SHA-256").digest(key + "check".toByteArray()))
-        if (v != p.getString(KEY_VERIFIER, null)) return null
-        wrapMaster(ctx, key, pin, salt) // the old key becomes the master key
-        p.edit().remove(KEY_VERIFIER).apply()
-        return key
-    }
-
-    // ---------- Encrypt ----------
-
-    private fun readFully(i: InputStream, b: ByteArray): Int {
-        var t = 0
-        while (t < b.size) {
-            val n = i.read(b, t, b.size - t)
-            if (n < 0) break
-            t += n
-        }
-        return t
-    }
-
-    private fun encryptTo(input: InputStream, out: File, key: SecretKey) {
-        if (out.exists()) out.delete()
-        val fileId = ByteArray(8).also { SecureRandom().nextBytes(it) }
+    override fun close() {
         try {
-            RandomAccessFile(out, "rw").use { raf ->
-                raf.write(MAGIC)
-                raf.write(fileId)
-                raf.writeLong(0L) // patched at the end
-                val buf = ByteArray(CHUNK)
-                var idx = 0L
-                var total = 0L
-                while (true) {
-                    val n = readFully(input, buf)
-                    if (n <= 0) break
-                    val c = Cipher.getInstance("AES/GCM/NoPadding")
-                    c.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, chunkIv(fileId, idx)))
-                    raf.write(c.doFinal(buf, 0, n))
-                    total += n
-                    idx++
-                    if (n < CHUNK) break
-                }
-                raf.seek(12)
-                raf.writeLong(total)
+            reader?.close()
+        } finally {
+            reader = null
+            currentUri = null
+            if (opened) {
+                opened = false
+                transferEnded()
             }
-        } catch (e: Throwable) {
-            out.delete() // never leave a half-written file
-            throw e
         }
     }
-
-    // ---------- Meta / thumbnails ----------
-
-    fun thumbFile(file: File) = File(file.parentFile, file.nameWithoutExtension + ".vtn")
-
-    private fun writeMeta(f: File, key: SecretKey, isVideo: Boolean, mime: String, thumb: ByteArray?) {
-        val bos = ByteArrayOutputStream()
-        val d = DataOutputStream(bos)
-        val t = thumb ?: ByteArray(0)
-        d.writeBoolean(isVideo)
-        d.writeUTF(mime)
-        d.writeInt(t.size)
-        d.write(t)
-        d.flush()
-        encryptTo(ByteArrayInputStream(bos.toByteArray()), f, key)
-    }
-
-    private fun parseMeta(f: File, key: SecretKey): ItemInfo {
-        VaultReader(f, key).use { r ->
-            val d = DataInputStream(ByteArrayInputStream(r.readAll()))
-            val isVideo = d.readBoolean()
-            val mime = d.readUTF()
-            val n = d.readInt()
-            val t = ByteArray(n)
-            d.readFully(t)
-            val bmp = if (n > 0) BitmapFactory.decodeByteArray(t, 0, n) else null
-            return ItemInfo(isVideo, mime, bmp)
-        }
-    }
-
-    /** Type, mime and thumbnail of an item. Creates the thumbnail for old files on first use. */
-    fun info(file: File): ItemInfo {
-        val key = sessionKey ?: error("Vault is locked")
-        val vtn = thumbFile(file)
-        if (vtn.exists()) {
-            val parsed = runCatching { parseMeta(vtn, key) }.getOrNull()
-            if (parsed != null) return parsed
-        }
-        if (file.extension == "vlt") {
-            // File saved by an older version of the app
-            if (file.length() > 40L * 1024 * 1024) return legacyVideo(vtn, key)
-            val bytes = readBytes(file)
-            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
-            if (o.outWidth <= 0) return legacyVideo(vtn, key)
-            val mime = o.outMimeType ?: "image/jpeg"
-            val jpg = photoThumb(bytes)
-            runCatching { writeMeta(vtn, key, false, mime, jpg) }
-            return ItemInfo(false, mime, jpg?.let { BitmapFactory.decodeByteArray(it, 0, it.size) })
-        }
-        return ItemInfo(false, "image/jpeg", null)
-    }
-
-    private fun legacyVideo(vtn: File, key: SecretKey): ItemInfo {
-        runCatching { writeMeta(vtn, key, true, "video/mp4", null) }
-        return ItemInfo(true, "video/mp4", null)
-    }
-
-    // ---------- Import ----------
-
-    /** Encrypts a shared photo or video into the vault. Returns the new .vlx file. */
-    fun importMedia(ctx: Context, uri: Uri): File {
-        val key = sessionKey ?: error("Vault is locked")
-        val mime = ctx.contentResolver.getType(uri) ?: "image/jpeg"
-        val isVideo = mime.startsWith("video/")
-        if (!isVideo && !mime.startsWith("image/")) throw IllegalArgumentException("Unsupported type")
-
-        val id = Base64.encodeToString(
-            ByteArray(9).also { SecureRandom().nextBytes(it) },
-            Base64.URL_SAFE or Base64.NO_WRAP
-        )
-        val dir = vaultDir()
-        val out = File(dir, "$id.vlx")
-        val vtn = File(dir, "$id.vtn")
-        try {
-            val thumb: ByteArray?
-            if (isVideo) {
-                ctx.contentResolver.openInputStream(uri)!!.use { encryptTo(it, out, key) }
-                thumb = videoThumb(ctx, uri)
-            } else {
-                val bytes = ctx.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
-                encryptTo(ByteArrayInputStream(bytes), out, key)
-                thumb = photoThumb(bytes)
-            }
-            writeMeta(vtn, key, isVideo, mime, thumb)
-        } catch (e: Throwable) {
-            out.delete()
-            vtn.delete()
-            throw e
-        }
-        return out
-    }
-
-    // ---------- Read ----------
-
-    private fun legacyStream(file: File, key: SecretKey): InputStream {
-        val fis = file.inputStream()
-        val iv = ByteArray(12)
-        fis.read(iv)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
-        return CipherInputStream(fis, cipher)
-    }
-
-    /** Whole decrypted file in memory. Use for photos only. */
-    fun readBytes(file: File): ByteArray {
-        val key = sessionKey ?: error("Vault is locked")
-        return if (file.extension == "vlt") legacyStream(file, key).use { it.readBytes() }
-        else VaultReader(file, key).use { it.readAll() }
-    }
-
-    /** Random-access reader (used by the video player). New .vlx files only. */
-    fun openReader(file: File): VaultReader {
-        val key = sessionKey ?: error("Vault is locked")
-        return VaultReader(file, key)
-    }
-
-    /** Streams the decrypted file into [out] (used by Restore). */
-    fun copyDecrypted(file: File, out: OutputStream) {
-        val key = sessionKey ?: error("Vault is locked")
-        if (file.extension == "vlt") legacyStream(file, key).use { it.copyTo(out) }
-        else VaultReader(file, key).use { it.copyTo(out) }
-    }
-
-    fun deleteItem(file: File) {
-        file.delete()
-        thumbFile(file).delete()
-    }
-
-    fun listItems(): List<File> =
-        vaultDir().listFiles { f -> f.extension == "vlx" || f.extension == "vlt" }?.toList()
-            ?: emptyList()
 }
