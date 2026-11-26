@@ -191,6 +191,7 @@ object VaultCrypto {
     private const val KEY_VERIFIER = "verifier" // old versions only
     private const val KEY_WRAPPED = "wrapped"
     private const val KEY_FAILS = "fails"
+    private const val KEY_LAST_FAIL = "last_fail"
     private const val KEY_LOCK_UNTIL = "lock_until"
     private const val LEGACY_ITERATIONS = 150_000
     private const val KS_ALIAS = "vault_wrap_key"
@@ -258,11 +259,14 @@ object VaultCrypto {
 
     private fun recordFailure(ctx: Context) {
         val p = prefs(ctx)
-        val n = p.getInt(KEY_FAILS, 0) + 1
-        val e = p.edit().putInt(KEY_FAILS, n)
-        if (n >= 5) {
-            val waitMs = 30_000L * (1L shl min(n - 5, 6))
-            e.putLong(KEY_LOCK_UNTIL, System.currentTimeMillis() + waitMs)
+        val now = System.currentTimeMillis()
+        // Old failures are forgotten after 6 hours, so normal calculator use never locks the vault
+        val old = if (now - p.getLong(KEY_LAST_FAIL, 0L) > 6L * 3600_000L) 0 else p.getInt(KEY_FAILS, 0)
+        val n = old + 1
+        val e = p.edit().putInt(KEY_FAILS, n).putLong(KEY_LAST_FAIL, now)
+        if (n >= 10) {
+            val waitMs = 30_000L * (1L shl min(n - 10, 6))
+            e.putLong(KEY_LOCK_UNTIL, now + waitMs)
         }
         e.apply()
     }
