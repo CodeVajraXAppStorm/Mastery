@@ -46,19 +46,28 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -113,14 +122,14 @@ import java.math.MathContext
 
 private const val APP_NAME = "Anshu Jainam Namya"
 
-private val Bg = Color(0xFF0A0E1A)
-private val Surf = Color(0xFF131A2B)
-private val Accent1 = Color(0xFF7C5CFF)
-private val Accent2 = Color(0xFF4F8CFF)
-private val TextPri = Color(0xFFF2F4FA)
-private val TextSec = Color(0xFF8E98B3)
-private val Danger = Color(0xFFFF5C7A)
-private val AccentBrush = Brush.linearGradient(listOf(Accent1, Accent2))
+internal val Bg = Color(0xFF0A0E1A)
+internal val Surf = Color(0xFF131A2B)
+internal val Accent1 = Color(0xFF7C5CFF)
+internal val Accent2 = Color(0xFF4F8CFF)
+internal val TextPri = Color(0xFFF2F4FA)
+internal val TextSec = Color(0xFF8E98B3)
+internal val Danger = Color(0xFFFF5C7A)
+internal val AccentBrush = Brush.linearGradient(listOf(Accent1, Accent2))
 
 private val VaultColors = darkColorScheme(
     primary = Accent1,
@@ -152,6 +161,13 @@ class MainActivity : ComponentActivity() {
     private var busyText by mutableStateOf<String?>(null)
     private var calcKey by mutableIntStateOf(0)
 
+    // Notes
+    private var section by mutableIntStateOf(0) // 0 = photos & videos, 1 = notes
+    private var notes by mutableStateOf<List<NoteRow>>(emptyList())
+    private var notesUnlocked by mutableStateOf(false)
+    private var notesPasswordOpen by mutableStateOf(false)
+    private var editing by mutableStateOf<NoteDraft?>(null)
+
     private val pendingShared = mutableListOf<Uri>()
     private val pendingDelete = mutableListOf<Uri>()
     private var importing = 0
@@ -182,22 +198,30 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme(colorScheme = VaultColors) {
                 var toDelete by remember { mutableStateOf<File?>(null) }
+                var confirmNoteDelete by remember { mutableStateOf(false) }
+                val drawerState = rememberDrawerState(DrawerValue.Closed)
+                val uiScope = rememberCoroutineScope()
                 val isUnlocked = unlocked
                 // Screenshots and Recents preview are blocked only while the vault is on screen
                 SideEffect { setSecure(isUnlocked) }
+                LaunchedEffect(isUnlocked) {
+                    if (!isUnlocked) drawerState.snapTo(DrawerValue.Closed)
+                }
 
                 Box(Modifier.fillMaxSize().background(if (isUnlocked) Bg else Color.Black)) {
-                    Box(Modifier.fillMaxSize().systemBarsPadding()) {
-                        when {
-                            !isUnlocked -> key(calcKey) {
+                    when {
+                        !isUnlocked -> Box(Modifier.fillMaxSize().systemBarsPadding()) {
+                            key(calcKey) {
                                 CalculatorScreen(
                                     setupMode = !pinSet,
                                     onSetup = { pin -> doSetup(pin) },
                                     onUnlock = { pin -> tryUnlock(pin) }
                                 )
                             }
+                        }
 
-                            !hasAllFiles -> PermissionScreen {
+                        !hasAllFiles -> Box(Modifier.fillMaxSize().systemBarsPadding()) {
+                            PermissionScreen {
                                 startActivity(
                                     Intent(
                                         Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
@@ -205,30 +229,113 @@ class MainActivity : ComponentActivity() {
                                     )
                                 )
                             }
+                        }
 
-                            else -> VaultScreen(
-                                photos = photos,
-                                busyText = busyText,
-                                onAdd = {
-                                    suppressLock = true
-                                    picker.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                        else -> ModalNavigationDrawer(
+                            drawerState = drawerState,
+                            drawerContent = {
+                                ModalDrawerSheet(drawerContainerColor = Surf) {
+                                    Row(
+                                        Modifier.padding(start = 24.dp, end = 24.dp, top = 32.dp, bottom = 24.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        AppBadge(48.dp)
+                                        Spacer(Modifier.width(14.dp))
+                                        Text(
+                                            APP_NAME,
+                                            color = TextPri, fontSize = 17.sp, fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                    val itemColors = NavigationDrawerItemDefaults.colors(
+                                        selectedContainerColor = Accent1.copy(alpha = 0.25f),
+                                        unselectedContainerColor = Color.Transparent,
+                                        selectedIconColor = Accent1,
+                                        unselectedIconColor = TextSec,
+                                        selectedTextColor = TextPri,
+                                        unselectedTextColor = TextSec
                                     )
-                                },
-                                onLock = { lockNow() },
-                                onOpen = { viewIndex = it }
-                            )
+                                    NavigationDrawerItem(
+                                        label = { Text("Photos & Videos") },
+                                        icon = { Icon(Icons.Filled.Lock, null) },
+                                        selected = section == 0,
+                                        onClick = {
+                                            selectSection(0)
+                                            uiScope.launch { drawerState.close() }
+                                        },
+                                        modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
+                                        colors = itemColors
+                                    )
+                                    NavigationDrawerItem(
+                                        label = { Text("Notes") },
+                                        icon = { Icon(Icons.Filled.Edit, null) },
+                                        selected = section == 1,
+                                        onClick = {
+                                            selectSection(1)
+                                            uiScope.launch { drawerState.close() }
+                                        },
+                                        modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
+                                        colors = itemColors
+                                    )
+                                }
+                            }
+                        ) {
+                            Box(Modifier.fillMaxSize().systemBarsPadding()) {
+                                if (section == 0) {
+                                    VaultScreen(
+                                        photos = photos,
+                                        busyText = busyText,
+                                        onMenu = { uiScope.launch { drawerState.open() } },
+                                        onAdd = {
+                                            suppressLock = true
+                                            picker.launch(
+                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                                            )
+                                        },
+                                        onLock = { lockNow() },
+                                        onOpen = { viewIndex = it }
+                                    )
+                                } else {
+                                    NotesScreen(
+                                        notes = notes,
+                                        unlocked = notesUnlocked,
+                                        onMenu = { uiScope.launch { drawerState.open() } },
+                                        onTitleLongPress = { onNotesTitleLongPress() },
+                                        onAdd = { editing = NoteDraft(null, "", "") },
+                                        onOpen = { row ->
+                                            row.data?.let { editing = NoteDraft(row.id, it.title, it.body) }
+                                        }
+                                    )
+                                }
+                            }
                         }
                     }
 
                     val vi = viewIndex
-                    if (isUnlocked && hasAllFiles && vi != null && photos.isNotEmpty()) {
+                    if (isUnlocked && hasAllFiles && section == 0 && vi != null && photos.isNotEmpty()) {
                         Viewer(
                             photos = photos,
                             startIndex = vi,
                             onClose = { viewIndex = null },
                             onRestore = { restoreToGallery(it) },
                             onDelete = { toDelete = it }
+                        )
+                    }
+
+                    val ed = editing
+                    if (isUnlocked && notesUnlocked && ed != null) {
+                        NoteEditor(
+                            draft = ed,
+                            onClose = { closeEditor() },
+                            onDelete = { confirmNoteDelete = true }
+                        )
+                    }
+
+                    if (isUnlocked && notesPasswordOpen) {
+                        NotesPasswordPage(
+                            setup = !NotesCrypto.isSet(this@MainActivity),
+                            onSetup = { pw -> notesSetup(pw) },
+                            onUnlock = { pw -> notesUnlock(pw) },
+                            onCancel = { notesPasswordOpen = false }
                         )
                     }
 
@@ -246,6 +353,24 @@ class MainActivity : ComponentActivity() {
                             },
                             dismissButton = {
                                 TextButton(onClick = { toDelete = null }) { Text("Cancel", color = TextSec) }
+                            }
+                        )
+                    }
+
+                    if (confirmNoteDelete && ed != null) {
+                        AlertDialog(
+                            onDismissRequest = { confirmNoteDelete = false },
+                            containerColor = Surf,
+                            title = { Text("Delete this note?") },
+                            text = { Text("It will be gone for good. This cannot be undone.", color = TextSec) },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    confirmNoteDelete = false
+                                    deleteEditingNote()
+                                }) { Text("Delete", color = Danger) }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { confirmNoteDelete = false }) { Text("Cancel", color = TextSec) }
                             }
                         )
                     }
@@ -275,13 +400,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        // Leaving the app (Home / Recents / screen off) locks the vault
+        // Leaving the app (Home / Recents / screen off) locks the vault and the notes
         if (!suppressLock) lockNow()
     }
 
     // ------------------------------------------------------------ lock / unlock
 
     private fun lockNow() {
+        lockNotes(refresh = false)
+        section = 0
         unlocked = false
         viewIndex = null
         calcKey++ // clears whatever was typed on the calculator
@@ -317,6 +444,78 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun listSorted() = VaultCrypto.listItems().sortedByDescending { it.lastModified() }
+
+    // ------------------------------------------------------------ notes
+
+    private fun selectSection(i: Int) {
+        if (section == 1 && i != 1) lockNotes()
+        section = i
+        if (i == 1) refreshNotes()
+    }
+
+    private fun refreshNotes() {
+        lifecycleScope.launch {
+            notes = withContext(Dispatchers.IO) { NotesCrypto.list(this@MainActivity) }
+        }
+    }
+
+    // Press and hold the "Notes" title: opens the password page, or locks the notes again
+    private fun onNotesTitleLongPress() {
+        if (notesUnlocked) lockNotes() else notesPasswordOpen = true
+    }
+
+    private fun lockNotes(refresh: Boolean = true) {
+        saveDraftNow() // never lose what was being typed
+        NotesCrypto.lock()
+        notesUnlocked = false
+        notesPasswordOpen = false
+        editing = null
+        notes = notes.map { NoteRow(it.id, it.modified, it.cipher, null) } // drop readable text from memory
+        if (refresh) refreshNotes()
+    }
+
+    private suspend fun notesSetup(pw: String) {
+        withContext(Dispatchers.Default) { NotesCrypto.setPassword(this@MainActivity, pw) }
+        onNotesUnlocked()
+    }
+
+    private suspend fun notesUnlock(pw: String): String? {
+        val wait = NotesCrypto.lockoutMs(this)
+        if (wait > 0) return "Too many attempts. Try again in ${(wait + 999) / 1000}s"
+        val ok = withContext(Dispatchers.Default) { NotesCrypto.unlock(this@MainActivity, pw) }
+        if (ok) {
+            onNotesUnlocked()
+            return null
+        }
+        val w2 = NotesCrypto.lockoutMs(this)
+        return if (w2 > 0) "Too many attempts. Try again in ${(w2 + 999) / 1000}s" else "Incorrect password"
+    }
+
+    private fun onNotesUnlocked() {
+        notesUnlocked = true
+        notesPasswordOpen = false
+        refreshNotes()
+    }
+
+    private fun saveDraftNow() {
+        val d = editing ?: return
+        if (!NotesCrypto.isUnlocked()) return
+        if (d.id == null && d.title.isBlank() && d.body.isBlank()) return
+        runCatching { NotesCrypto.save(this, d.id, d.title, d.body) }.onSuccess { d.id = it }
+    }
+
+    private fun closeEditor() {
+        saveDraftNow()
+        editing = null
+        refreshNotes()
+    }
+
+    private fun deleteEditingNote() {
+        val d = editing ?: return
+        d.id?.let { NotesCrypto.delete(this, it) }
+        editing = null
+        refreshNotes()
+    }
 
     // ------------------------------------------------------------ import (Share)
 
@@ -881,6 +1080,7 @@ fun PermissionScreen(onOpenSettings: () -> Unit) {
 fun VaultScreen(
     photos: List<File>,
     busyText: String?,
+    onMenu: () -> Unit,
     onAdd: () -> Unit,
     onLock: () -> Unit,
     onOpen: (Int) -> Unit
@@ -890,7 +1090,7 @@ fun VaultScreen(
             Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AppBadge(44.dp)
+            IconCircleButton(Icons.Filled.Menu, accent = false, onClick = onMenu)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(APP_NAME, color = TextPri, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
