@@ -26,15 +26,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -49,8 +42,6 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
@@ -68,9 +59,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -79,28 +72,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -121,7 +106,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
-import kotlin.math.roundToInt
+import java.math.BigDecimal
+import java.math.MathContext
 
 // ============================================================ theme
 
@@ -145,12 +131,6 @@ private val VaultColors = darkColorScheme(
     onSurface = TextPri
 )
 
-sealed class PinResult {
-    object Success : PinResult()
-    object Next : PinResult()
-    data class Error(val msg: String) : PinResult()
-}
-
 object ThumbCache {
     private val cache = object : LruCache<String, ItemInfo>((Runtime.getRuntime().maxMemory() / 8).toInt()) {
         override fun sizeOf(key: String, value: ItemInfo) = value.thumb?.byteCount ?: 1024
@@ -170,6 +150,7 @@ class MainActivity : ComponentActivity() {
     private var photos by mutableStateOf<List<File>>(emptyList())
     private var viewIndex by mutableStateOf<Int?>(null)
     private var busyText by mutableStateOf<String?>(null)
+    private var calcKey by mutableIntStateOf(0)
 
     private val pendingShared = mutableListOf<Uri>()
     private val pendingDelete = mutableListOf<Uri>()
@@ -195,51 +176,25 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
         )
-        // No screenshots, blank preview in Recent apps
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_SECURE,
-            WindowManager.LayoutParams.FLAG_SECURE
-        )
         pinSet = VaultCrypto.isPinSet(this)
         if (savedInstanceState == null) handleIntent(intent)
 
         setContent {
             MaterialTheme(colorScheme = VaultColors) {
                 var toDelete by remember { mutableStateOf<File?>(null) }
+                val isUnlocked = unlocked
+                // Screenshots and Recents preview are blocked only while the vault is on screen
+                SideEffect { setSecure(isUnlocked) }
 
-                Box(Modifier.fillMaxSize().background(Bg)) {
+                Box(Modifier.fillMaxSize().background(if (isUnlocked) Bg else Color.Black)) {
                     Box(Modifier.fillMaxSize().systemBarsPadding()) {
                         when {
-                            !pinSet -> SetupPin { pin ->
-                                withContext(Dispatchers.Default) { VaultCrypto.setupPin(this@MainActivity, pin) }
-                                pinSet = true
-                                unlocked = true
-                                afterUnlock()
-                            }
-
-                            !unlocked -> PinScreen(
-                                subtitle = "Enter your PIN to unlock",
-                                hint = null
-                            ) { pin ->
-                                val wait = VaultCrypto.lockoutMs(this@MainActivity)
-                                if (wait > 0) {
-                                    PinResult.Error("Too many attempts. Try again in ${(wait + 999) / 1000}s")
-                                } else {
-                                    val ok = withContext(Dispatchers.Default) {
-                                        VaultCrypto.unlock(this@MainActivity, pin)
-                                    }
-                                    if (ok) {
-                                        unlocked = true
-                                        afterUnlock()
-                                        PinResult.Success
-                                    } else {
-                                        val w2 = VaultCrypto.lockoutMs(this@MainActivity)
-                                        PinResult.Error(
-                                            if (w2 > 0) "Too many attempts. Try again in ${(w2 + 999) / 1000}s"
-                                            else "Incorrect PIN"
-                                        )
-                                    }
-                                }
+                            !isUnlocked -> key(calcKey) {
+                                CalculatorScreen(
+                                    setupMode = !pinSet,
+                                    onSetup = { pin -> doSetup(pin) },
+                                    onUnlock = { pin -> tryUnlock(pin) }
+                                )
                             }
 
                             !hasAllFiles -> PermissionScreen {
@@ -267,7 +222,7 @@ class MainActivity : ComponentActivity() {
                     }
 
                     val vi = viewIndex
-                    if (unlocked && hasAllFiles && vi != null && photos.isNotEmpty()) {
+                    if (isUnlocked && hasAllFiles && vi != null && photos.isNotEmpty()) {
                         Viewer(
                             photos = photos,
                             startIndex = vi,
@@ -299,6 +254,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun setSecure(on: Boolean) {
+        if (on) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -324,9 +284,27 @@ class MainActivity : ComponentActivity() {
     private fun lockNow() {
         unlocked = false
         viewIndex = null
+        calcKey++ // clears whatever was typed on the calculator
         ThumbCache.clear()
         // If an import is still running, the key is cleared as soon as it finishes
         if (importing == 0) VaultCrypto.lock()
+    }
+
+    private suspend fun tryUnlock(pin: String): Boolean {
+        if (VaultCrypto.lockoutMs(this) > 0) return false
+        val ok = withContext(Dispatchers.Default) { VaultCrypto.unlock(this@MainActivity, pin) }
+        if (ok) {
+            unlocked = true
+            afterUnlock()
+        }
+        return ok
+    }
+
+    private suspend fun doSetup(pin: String) {
+        withContext(Dispatchers.Default) { VaultCrypto.setupPin(this@MainActivity, pin) }
+        pinSet = true
+        unlocked = true
+        afterUnlock()
     }
 
     private fun afterUnlock() {
@@ -358,7 +336,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Shared items wait here until the PIN is entered
+    // Shared items wait here until the vault is opened
     private fun processPending() {
         if (!unlocked || !hasAllFiles || pendingShared.isEmpty()) return
         val uris = pendingShared.toList()
@@ -470,141 +448,340 @@ class MainActivity : ComponentActivity() {
     }.getOrDefault(false)
 }
 
-// ============================================================ PIN screens
+// ============================================================ calculator (the disguise)
+
+private val CalcBg = Color(0xFF000000)
+private val CalcKey = Color(0xFF2B2B2F)
+private val CalcFn = Color(0xFF4A4A50)
+private val CalcOp = Color(0xFFFF9500)
+private val CalcGray = Color(0xFF8E8E93)
+private const val OPS = "+−×÷"
 
 @Composable
-fun SetupPin(onDone: suspend (String) -> Unit) {
+fun CalculatorScreen(
+    setupMode: Boolean,
+    onSetup: suspend (String) -> Unit,
+    onUnlock: suspend (String) -> Boolean
+) {
+    var expr by remember { mutableStateOf("") }
+    var shown by remember { mutableStateOf("") }
+    var evaluated by remember { mutableStateOf(false) }
     var first by remember { mutableStateOf<String?>(null) }
-    PinScreen(
-        subtitle = if (first == null) "Create a 6-digit PIN" else "Confirm your PIN",
-        hint = "If you forget this PIN, your photos cannot be recovered."
-    ) { p ->
-        if (first == null) {
-            first = p
-            PinResult.Next
-        } else if (first == p) {
-            onDone(p)
-            PinResult.Success
-        } else {
-            first = null
-            PinResult.Error("PINs didn't match. Try again.")
-        }
+    var hint by remember {
+        mutableStateOf<String?>(if (setupMode) "Set a password: type 4-8 digits, then press =" else null)
     }
-}
-
-@Composable
-fun PinScreen(subtitle: String, hint: String?, onComplete: suspend (String) -> PinResult) {
-    var pin by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var errMsg by remember { mutableStateOf<String?>(null) }
-    val shake = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
-    val haptic = LocalHapticFeedback.current
-    val focus = remember { FocusRequester() }
 
-    LaunchedEffect(Unit) {
-        kotlinx.coroutines.delay(150)
-        runCatching { focus.requestFocus() }
+    fun clearAll() {
+        expr = ""
+        shown = ""
+        evaluated = false
     }
 
-    fun submit(p: String) {
-        busy = true
-        scope.launch {
-            when (val r = onComplete(p)) {
-                is PinResult.Success -> Unit
-                is PinResult.Next -> {
-                    pin = ""
-                    busy = false
-                }
-                is PinResult.Error -> {
-                    errMsg = r.msg
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    for (v in listOf(-22f, 22f, -14f, 14f, -6f, 6f, 0f)) shake.animateTo(v, tween(45))
-                    pin = ""
-                    busy = false
-                }
+    fun onDigit(c: String) {
+        if (evaluated || expr == "Error") {
+            expr = if (c == ".") "0." else c
+            shown = ""
+            evaluated = false
+            return
+        }
+        if (expr.length >= 40) return
+        if (c == ".") {
+            val seg = expr.takeLastWhile { it.isDigit() || it == '.' }
+            if (seg.contains('.')) return
+            expr += if (seg.isEmpty()) "0." else "."
+            return
+        }
+        val last = expr.lastOrNull()
+        expr += if (last == ')' || last == '%') "×$c" else c
+    }
+
+    fun onOp(o: String) {
+        if (expr == "Error") return
+        if (evaluated) {
+            evaluated = false
+            shown = ""
+        }
+        if (expr.isEmpty()) {
+            if (o == "−") expr = "−"
+            return
+        }
+        val last = expr.last()
+        when {
+            o == "−" && (last == '×' || last == '÷') -> expr += o
+            OPS.contains(last) -> {
+                if (expr.length == 1) return
+                expr = expr.dropLast(1) + o
             }
+            last == '(' -> if (o == "−") expr += o
+            else -> expr += o
         }
     }
 
-    Column(
-        Modifier.fillMaxSize().imePadding().padding(horizontal = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Spacer(Modifier.weight(1f))
-        AppBadge(72.dp)
-        Spacer(Modifier.height(16.dp))
-        Text(APP_NAME, color = TextPri, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(6.dp))
-        Text(subtitle, color = TextSec, fontSize = 14.sp)
-        Spacer(Modifier.height(30.dp))
+    fun onPercent() {
+        if (expr == "Error" || expr.isEmpty()) return
+        if (evaluated) {
+            evaluated = false
+            shown = ""
+        }
+        val last = expr.last()
+        if (last.isDigit() || last == ')' || last == '%') expr += "%"
+    }
 
-        Box(Modifier.offset { IntOffset(shake.value.roundToInt(), 0) }) {
-            Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                repeat(6) { i -> Dot(filled = i < pin.length, error = errMsg != null) }
-            }
-            // Invisible field on top of the dots: tapping it opens the number-only keyboard
-            BasicTextField(
-                value = pin,
-                onValueChange = { v ->
-                    if (!busy) {
-                        val d = v.filter { it.isDigit() }.take(6)
-                        errMsg = null
-                        pin = d
-                        if (d.length == 6) submit(d)
+    fun onParen() {
+        if (evaluated || expr == "Error") {
+            expr = "("
+            shown = ""
+            evaluated = false
+            return
+        }
+        val open = expr.count { it == '(' }
+        val close = expr.count { it == ')' }
+        val last = expr.lastOrNull()
+        val valueEnd = last != null && (last.isDigit() || last == ')' || last == '%')
+        expr += when {
+            open > close && valueEnd -> ")"
+            valueEnd || last == '.' -> "×("
+            else -> "("
+        }
+    }
+
+    fun onBack() {
+        if (evaluated || expr == "Error") {
+            clearAll()
+            return
+        }
+        expr = expr.dropLast(1)
+    }
+
+    fun onEquals() {
+        if (evaluated || expr == "Error" || expr.isEmpty()) return
+        val e = expr
+        if (e.all { it.isDigit() }) {
+            if (setupMode) {
+                if (e.length < 4 || e.length > 8) {
+                    hint = "Password must be 4 to 8 digits"
+                    expr = ""
+                    return
+                }
+                val f = first
+                when {
+                    f == null -> {
+                        first = e
+                        expr = ""
+                        hint = "Confirm your password, then press ="
                     }
+                    f == e -> {
+                        expr = ""
+                        hint = null
+                        scope.launch { onSetup(e) }
+                    }
+                    else -> {
+                        first = null
+                        expr = ""
+                        hint = "Passwords did not match. Enter a password, then press ="
+                    }
+                }
+                return
+            }
+            if (e.length in 4..8) {
+                scope.launch {
+                    if (onUnlock(e)) {
+                        clearAll()
+                    } else {
+                        // Wrong code: behave exactly like a normal calculator
+                        shown = e
+                        evaluated = true
+                    }
+                }
+                return
+            }
+        }
+        val r = calcEvaluate(e)
+        shown = e
+        expr = r ?: "Error"
+        evaluated = true
+    }
+
+    Column(Modifier.fillMaxSize().background(CalcBg).padding(horizontal = 16.dp)) {
+        Column(
+            Modifier.weight(1f).fillMaxWidth().padding(bottom = 8.dp),
+            verticalArrangement = Arrangement.Bottom,
+            horizontalAlignment = Alignment.End
+        ) {
+            val h = hint
+            if (h != null) {
+                Text(
+                    h,
+                    color = CalcGray, fontSize = 13.sp, textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+                )
+            }
+            if (shown.isNotEmpty()) {
+                Text(shown, color = CalcGray, fontSize = 22.sp, maxLines = 1)
+            }
+            val big = if (expr.isEmpty()) "0" else expr
+            Text(
+                big,
+                color = Color.White,
+                fontSize = when {
+                    big.length > 14 -> 34.sp
+                    big.length > 9 -> 48.sp
+                    else -> 64.sp
                 },
-                modifier = Modifier.matchParentSize().focusRequester(focus),
-                textStyle = TextStyle(color = Color.Transparent),
-                cursorBrush = SolidColor(Color.Transparent),
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                maxLines = 2,
+                textAlign = TextAlign.End
             )
         }
 
-        Spacer(Modifier.height(16.dp))
-        Box(Modifier.heightIn(min = 40.dp), contentAlignment = Alignment.TopCenter) {
-            val msg = when {
-                errMsg != null -> errMsg
-                busy -> "Please wait…"
-                else -> hint
-            }
-            if (msg != null) {
-                Text(
-                    msg,
-                    color = if (errMsg != null) Danger else TextSec,
-                    fontSize = 13.sp,
-                    textAlign = TextAlign.Center
-                )
-            }
+        CalcRow {
+            CalcButton("AC", CalcFn) { clearAll() }
+            CalcButton("( )", CalcFn) { onParen() }
+            CalcButton("%", CalcFn) { onPercent() }
+            CalcButton("÷", CalcOp) { onOp("÷") }
         }
-        Spacer(Modifier.weight(1.5f))
+        CalcRow {
+            CalcButton("7", CalcKey) { onDigit("7") }
+            CalcButton("8", CalcKey) { onDigit("8") }
+            CalcButton("9", CalcKey) { onDigit("9") }
+            CalcButton("×", CalcOp) { onOp("×") }
+        }
+        CalcRow {
+            CalcButton("4", CalcKey) { onDigit("4") }
+            CalcButton("5", CalcKey) { onDigit("5") }
+            CalcButton("6", CalcKey) { onDigit("6") }
+            CalcButton("−", CalcOp) { onOp("−") }
+        }
+        CalcRow {
+            CalcButton("1", CalcKey) { onDigit("1") }
+            CalcButton("2", CalcKey) { onDigit("2") }
+            CalcButton("3", CalcKey) { onDigit("3") }
+            CalcButton("+", CalcOp) { onOp("+") }
+        }
+        CalcRow {
+            CalcButton("←", CalcFn) { onBack() }
+            CalcButton("0", CalcKey) { onDigit("0") }
+            CalcButton(".", CalcKey) { onDigit(".") }
+            CalcButton("=", CalcOp) { onEquals() }
+        }
+        Spacer(Modifier.height(4.dp))
     }
 }
 
 @Composable
-fun Dot(filled: Boolean, error: Boolean) {
-    val scale by animateFloatAsState(
-        if (filled) 1.2f else 1f,
-        spring(Spring.DampingRatioMediumBouncy),
-        label = "dotScale"
+private fun CalcRow(content: @Composable RowScope.() -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(bottom = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        content = content
     )
-    val fill by animateColorAsState(
-        when {
-            error -> Danger
-            filled -> Accent1
-            else -> Color.Transparent
-        },
-        label = "dotColor"
-    )
+}
+
+@Composable
+private fun RowScope.CalcButton(label: String, bg: Color, onClick: () -> Unit) {
     Box(
         Modifier
-            .size(16.dp)
-            .graphicsLayer(scaleX = scale, scaleY = scale)
+            .weight(1f)
+            .aspectRatio(1f)
             .clip(CircleShape)
-            .background(fill)
-            .border(1.5.dp, if (error) Danger else if (filled) Accent1 else TextSec, CircleShape)
-    )
+            .background(bg)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+/** Evaluates an expression like 12×15+3% . Returns null if it is invalid. */
+fun calcEvaluate(s: String): String? = try {
+    var t = s
+    while (t.isNotEmpty() && OPS.contains(t.last())) t = t.dropLast(1)
+    val missing = t.count { it == '(' } - t.count { it == ')' }
+    if (missing > 0) t += ")".repeat(missing)
+    if (t.isEmpty()) {
+        null
+    } else {
+        var r = CalcParser(t).parse().round(MathContext(15)).stripTrailingZeros()
+        if (r.signum() == 0) r = BigDecimal.ZERO
+        r.toPlainString().replace('-', '−')
+    }
+} catch (e: Exception) {
+    null
+}
+
+private class CalcParser(private val s: String) {
+    private var i = 0
+
+    fun parse(): BigDecimal {
+        val v = expr()
+        if (i != s.length) throw IllegalArgumentException("bad expression")
+        return v
+    }
+
+    private fun expr(): BigDecimal {
+        var v = term()
+        while (i < s.length && (s[i] == '+' || s[i] == '−')) {
+            val op = s[i++]
+            val start = i
+            val r = term()
+            val seg = s.substring(start, i)
+            // 200+10% means 200 + 10% of 200
+            val pct = seg.endsWith("%") && !seg.contains('×') && !seg.contains('÷')
+            val rr = if (pct) v.multiply(r) else r
+            v = if (op == '+') v.add(rr) else v.subtract(rr)
+        }
+        return v
+    }
+
+    private fun term(): BigDecimal {
+        var v = unary()
+        while (i < s.length && (s[i] == '×' || s[i] == '÷')) {
+            val op = s[i++]
+            val r = unary()
+            v = if (op == '×') {
+                v.multiply(r)
+            } else {
+                if (r.signum() == 0) throw ArithmeticException("divide by zero")
+                v.divide(r, MathContext(15))
+            }
+        }
+        return v
+    }
+
+    private fun unary(): BigDecimal {
+        if (i < s.length && s[i] == '−') {
+            i++
+            return unary().negate()
+        }
+        if (i < s.length && s[i] == '+') {
+            i++
+            return unary()
+        }
+        return postfix()
+    }
+
+    private fun postfix(): BigDecimal {
+        var v = primary()
+        while (i < s.length && s[i] == '%') {
+            i++
+            v = v.divide(BigDecimal(100))
+        }
+        return v
+    }
+
+    private fun primary(): BigDecimal {
+        if (i < s.length && s[i] == '(') {
+            i++
+            val v = expr()
+            if (i >= s.length || s[i] != ')') throw IllegalArgumentException("missing )")
+            i++
+            return v
+        }
+        val st = i
+        while (i < s.length && (s[i].isDigit() || s[i] == '.')) i++
+        if (st == i) throw IllegalArgumentException("number expected")
+        return BigDecimal(s.substring(st, i))
+    }
 }
 
 // ============================================================ common bits
